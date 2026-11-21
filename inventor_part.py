@@ -1,0 +1,391 @@
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+"""Inventor-Bauteil (.ipt) -> Körper mit Netz und Farben, ohne Inventor und ohne bpy.
+
+Netz aus PmGraphicsSegment (Anzeigenetz je Fläche), Körper und Flächenfarben aus PmBRepSegment (ASM/ACIS SAB),
+Farbwerte aus PmAppSegment (Darstellungen). Zuordnung B-Rep-Fläche <-> Grafikfläche über die Eckpunkte
+(liegen exakt im Netz), Feature-ID und Flächenart. Format und Regeln: atlas/ATLAS.md („.ipt-Netz“).
+Prototyp mit Diagnose-Ausgabe: tools/ipt_probe.py.
+"""
+import bisect
+import re
+import struct
+import zlib
+from collections import defaultdict
+
+import numpy as np
+
+from .inventor_data import Cfb, InventorError, PartFileError
+
+HEAD = b"\x02\x00\x00\x30"
+# Kopf eines Flächen-Eintrags: Feld (k, k, 0x10000000) mit k Paaren (Feature-ID u32, ffffffff), meist k = 1.
+# Arbeitsebenen/Skizzen haben andere Köpfe und bleiben so außen vor.
+FACE_MARK = re.compile(rb"\x02\x00\x00\x30([\x01-\x40])\x00\x00\x00\1\x00\x00\x00\x00\x00\x00\x10....\xff\xff\xff\xff", re.S)
+POINT_TOL = 1e-3             # cm: B-Rep-Eckpunkt liegt im Grafiknetz
+SURF_TOL = 2e-3              # cm: Netzpunkte liegen auf der B-Rep-Fläche
+CM_TO_MM = 10.0
+
+
+# ---------- Datei ----------
+
+def segments(data):
+    """{Segmentname: entpackte Bytes} aus RSeStorage (Meta-Stream M…: Name UTF-16, Daten-Stream B…: 18 Byte Kopf + zlib)."""
+    cfb = Cfb(data)
+    out = {}
+    for p in cfb.paths():
+        if p.startswith("RSeStorage/M"):
+            words = re.findall(rb"(?:[\x20-\x7e]\x00){4,}", cfb.get(p) or b"")
+            raw = cfb.get("RSeStorage/B" + p[12:])
+            if not words or raw is None:
+                continue
+            try:
+                raw = zlib.decompressobj().decompress(raw[18:])
+            except zlib.error:
+                continue
+            out.setdefault(words[0].decode("utf-16le"), raw)
+    return out
+
+
+# ---------- Grafiksegment ----------
+
+def _arrays(b):
+    out = []
+    for mm in re.finditer(re.escape(HEAD), b):
+        o = mm.start()
+        if o + 16 > len(b):
+            continue
+        a, c, t = struct.unpack_from("<3I", b, o + 4)
+        if 0 < a <= c < 10_000_000 and (t < 16 or 250 < t < 400):
+            out.append((o, t, a))
+    return out
+
+
+def graphic_faces(b):
+    """Flächen des Anzeigenetzes: dict(mark, feature, pts[N,3] cm, idx[M,3], nor[N,3]).
+    Satz = Positionen (Typ t), Indizes u32 (kleiner Typ), Normalen (t+1) gleicher Anzahl; t hängt von der Version ab.
+    Je Flächen-Eintrag erst die feine, dann die grobe Stufe -> nur der erste Satz zählt."""
+    marks = [mm.start() for mm in FACE_MARK.finditer(b)]
+    arr = _arrays(b)
+    out, seen = [], set()
+    for i, (o, t, n) in enumerate(arr):
+        if not (t > 250 and i + 2 < len(arr) and arr[i + 1][1] < 16 and arr[i + 2][1] == t + 1 and arr[i + 2][2] == n):
+            continue
+        k = bisect.bisect_left(marks, o) - 1
+        if k < 0 or marks[k] in seen:
+            continue
+        io, _, ni = arr[i + 1]
+        if ni % 3 or io + 16 + ni * 4 > len(b) or o + 16 + n * 12 > len(b):
+            continue
+        idx = np.frombuffer(b, "<u4", ni, io + 16)
+        if ni and idx.max() >= n:
+            continue
+        seen.add(marks[k])
+        no = arr[i + 2][0]
+        out.append(dict(mark=marks[k], feature=struct.unpack_from("<I", b, marks[k] + 16)[0],
+                        pts=np.frombuffer(b, "<f4", n * 3, o + 16).reshape(-1, 3).astype(np.float64),
+                        idx=idx.reshape(-1, 3).astype(np.int64),
+                        nor=np.frombuffer(b, "<f4", n * 3, no + 16).reshape(-1, 3).astype(np.float64)))
+    return out
+
+
+def _rgba_pair_at(b, o):
+    """16 Null-Byte, dann RGBA ambient und RGBA diffus (gleich) -> diffus oder None."""
+    if b[o:o + 16] != bytes(16) or o + 48 > len(b):
+        return None
+    amb = struct.unpack_from("<4f", b, o + 16)
+    dif = struct.unpack_from("<4f", b, o + 32)
+    if dif[3] == 1.0 and all(0.0 <= x <= 1.0 for x in dif[:3]) and max(dif[:3]) > 0.01 and amb == dif:
+        return dif
+    return None
+
+
+def material_states(b):
+    """Materialsätze im Grafiksegment als [(offset, rgba)], aufsteigend. Kopf variiert, darum über die Form gesucht:
+    16 Null-Byte + zweimal dieselbe RGBA. Ein Satz gilt für die folgenden Flächen (Teilfarbe vor der ersten Fläche,
+    Feature-Darstellung vor den Flächen des Features) – an Testdateien gesehen, nicht bewiesen."""
+    out = []
+    for mm in re.finditer(rb"\x00{16,}", b):
+        rgba = _rgba_pair_at(b, mm.end() - 16)
+        if rgba:
+            out.append((mm.end() - 16, rgba))
+    return out
+
+
+def _material_before(states, offsets, mark):
+    k = bisect.bisect_left(offsets, mark) - 1
+    return states[k][1] if k >= 0 else None
+
+
+# ---------- B-Rep (ASM/ACIS SAB) ----------
+
+def sab_entities(b):
+    """Entities als Token-Listen; Index = Zeigerwert in SAB (Kopf ist Entity 0). Historie wird nicht gelesen."""
+    i = b.find(b"ASM BinaryFile")
+    if i < 0:
+        return []
+    o = i + len(b"ASM BinaryFile4") + 16
+    ents, cur, n = [], [], len(b)
+    try:
+        while o < n:
+            t = b[o]; o += 1
+            if t == 0x04:
+                cur.append(("i", struct.unpack_from("<i", b, o)[0])); o += 4
+            elif t == 0x06:
+                cur.append(("d", struct.unpack_from("<d", b, o)[0])); o += 8
+            elif t in (0x07, 0x08, 0x09, 0x12):
+                size = {0x07: 1, 0x08: 2, 0x09: 4, 0x12: 4}[t]
+                ln = int.from_bytes(b[o:o + size], "little"); o += size
+                cur.append(("s", b[o:o + ln].decode("latin-1"))); o += ln
+            elif t in (0x0A, 0x0B):
+                cur.append(("b", t == 0x0B))
+            elif t == 0x0C:
+                cur.append(("p", struct.unpack_from("<i", b, o)[0])); o += 4
+            elif t in (0x0D, 0x0E):
+                ln = b[o]; o += 1
+                cur.append(("id", b[o:o + ln].decode("latin-1"))); o += ln
+            elif t in (0x0F, 0x10):
+                pass
+            elif t == 0x11:
+                ents.append(cur); cur = []
+                name = "-".join(v for k, v in ents[-1] if k == "id")     # Bezeichner kommen als Einzelteile
+                if name.startswith(("End-of-ASM-data", "Begin-of-ASM-History")):
+                    ents.pop()
+                    break
+            elif t in (0x13, 0x14):
+                cur.append(("v", struct.unpack_from("<3d", b, o))); o += 24
+            elif t == 0x15:
+                cur.append(("e", struct.unpack_from("<i", b, o)[0])); o += 4
+            elif t == 0x16:
+                cur.append(("v2", struct.unpack_from("<2d", b, o))); o += 16
+            else:
+                break                       # unbekanntes Tag: Rest nicht lesbar
+    except struct.error:
+        pass                                # abgeschnittene Daten: bis hierher verwenden
+    return ents
+
+
+def _kind(ent):
+    """(Art, Unterart): letzter Bezeichner vor dem ersten Wert ('face', 'attrib' …) und erster ('plane', …)."""
+    ids = []
+    for k, v in ent:
+        if k != "id":
+            break
+        ids.append(v)
+    return (ids[-1], ids[0]) if ids else ("", "")
+
+
+def brep_faces(b):
+    """-> Liste dict(body, points[N,3] cm, colors[(stufe, name)], feature, surface=(art, werte))."""
+    ents = sab_entities(b)
+    if not ents:
+        return []
+    kind = [_kind(e) for e in ents]
+    ptrs = [[v for k, v in e if k == "p"] for e in ents]
+
+    def ptr_of(i, wanted):
+        return [p for p in ptrs[i] if 0 <= p < len(ents) and kind[p][0] == wanted]
+
+    def body_of(face):
+        shell = (ptr_of(face, "shell") or [None])[0]
+        lump = (ptr_of(shell, "lump") or [None])[-1] if shell is not None else None
+        return (ptr_of(lump, "body") or [None])[0] if lump is not None else None
+
+    loops_of, coedges_of = defaultdict(list), defaultdict(list)
+    for i, (k, _) in enumerate(kind):
+        if k == "loop":
+            f = ptr_of(i, "face")
+            if f:
+                loops_of[f[-1]].append(i)
+        elif k == "coedge":
+            lp = ptr_of(i, "loop")
+            if lp:
+                coedges_of[lp[0]].append(i)
+
+    out = []
+    for f, (k, _) in enumerate(kind):
+        if k != "face":
+            continue
+        pts = {}
+        for lp in loops_of[f]:
+            for ce in coedges_of[lp]:
+                for e in ptr_of(ce, "edge"):
+                    for v in ptr_of(e, "vertex"):
+                        for p in ptr_of(v, "point"):
+                            vec = next((val for kk, val in ents[p] if kk == "v"), None)
+                            if vec:
+                                pts[p] = vec
+        # Attribut-Kette: ATTRIB_CUSTOM mit Flächenfarbe (Stufe 1 Körper/Feature, 2 Fläche) und Feature-ID
+        colors, feature = [], None
+        a = ptrs[f][0] if ptrs[f] else -1
+        guard = 0
+        while 0 <= a < len(ents) and kind[a][0] == "attrib" and guard < 100:
+            strs = [v for kk, v in ents[a] if kk == "s"]
+            ints = [v for kk, v in ents[a] if kk == "i"]
+            if "INV_NMX_FACE_COLOR_ATTRIB" in strs and len(strs) > 1 and len(ints) > 3:
+                colors.append((ints[3], strs[1]))
+            elif "INV_NMX_SWEEPGENERATED_TAG" in strs and len(ints) > 4:
+                feature = ints[4]
+            a = ptrs[a][1] if len(ptrs[a]) > 1 else -1
+            guard += 1
+        surf = None
+        sp = ptr_of(f, "surface")
+        if sp:
+            surf = (kind[sp[0]][1], [(kk, v) for kk, v in ents[sp[0]] if kk in ("v", "d")])
+        out.append(dict(body=body_of(f), points=np.array(list(pts.values()), dtype=np.float64).reshape(-1, 3),
+                        colors=colors, feature=feature, surface=surf))
+    return out
+
+
+def surface_distance(surf, pts):
+    """Größter Abstand der Punkte zur Fläche (cm) oder None, wenn die Art nicht geprüft wird."""
+    if not surf:
+        return None
+    art, vals = surf
+    vs = [v for k, v in vals if k == "v"]
+    ds = [v for k, v in vals if k == "d"]
+    try:
+        if art == "plane":
+            root, n = np.array(vs[0]), np.array(vs[1])
+            return float(np.abs((pts - root) @ n).max())
+        if art == "sphere":
+            c, r = np.array(vs[0]), abs(ds[0])
+            return float(np.abs(np.linalg.norm(pts - c, axis=1) - r).max())
+        if art == "torus":
+            c, ax, big, r = np.array(vs[0]), np.array(vs[1]), ds[0], abs(ds[1])
+            q = pts - c
+            h = q @ ax
+            rho = np.linalg.norm(q - np.outer(h, ax), axis=1)
+            return float(np.abs(np.hypot(rho - big, h) - r).max())
+        if art == "cone" and len(ds) >= 3 and abs(ds[1]) < 1e-12:      # Zylinder (sin = 0)
+            root, ax, major = np.array(vs[0]), np.array(vs[1]), np.array(vs[2])
+            q = pts - root
+            rho = np.linalg.norm(q - np.outer(q @ ax, ax), axis=1)
+            return float(np.abs(rho - np.linalg.norm(major)).max())
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+# ---------- Darstellungen ----------
+
+def appearance_rgba(app, name):
+    """Darstellungsname (Sprache der Inventor-Installation, wie im B-Rep) -> RGBA aus PmAppSegment oder None.
+    Nach dem Namen folgt das Asset ('1:<Name>') und darin die erste RGBA mit a = 1."""
+    if not app or not name:
+        return None
+    key = name.encode("utf-16le")
+    marker = "1:".encode("utf-16le")
+    start = 0
+    while True:
+        k = app.find(key, start)
+        if k < 0:
+            return None
+        asset = app.find(marker, k, k + 800)
+        if asset >= 0:
+            for o in range(asset, min(asset + 900, len(app) - 16)):
+                r, g, bl, a = struct.unpack_from("<4f", app, o)
+                if a == 1.0 and all(0.0 <= x <= 1.0 for x in (r, g, bl)) and max(r, g, bl) > 0.01:
+                    return (r, g, bl, a)
+        start = k + 2
+
+
+# ---------- Zuordnung ----------
+
+def match_faces(gfaces, bfaces):
+    """{Index Grafikfläche: Index B-Rep-Fläche}. Kandidaten: alle Eckpunkte im Netz, Feature-ID gleich, Netz auf der Fläche.
+    Eindeutige zuerst: immer die B-Rep-Fläche mit den wenigsten freien Kandidaten zuordnen."""
+    grid = defaultdict(set)
+    for gi, g in enumerate(gfaces):
+        for p in np.floor(g["pts"] / POINT_TOL).astype(np.int64):
+            grid[tuple(p)].add(gi)
+
+    def faces_at(p):
+        c = np.floor(np.asarray(p) / POINT_TOL).astype(np.int64)
+        hit = set()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    hit |= grid.get((c[0] + dx, c[1] + dy, c[2] + dz), set())
+        return hit
+
+    pairs = []
+    for bi, f in enumerate(bfaces):
+        cand = None
+        for p in f["points"]:
+            hit = faces_at(p)
+            cand = hit if cand is None else cand & hit
+        if cand is None:                      # Fläche ohne Eckpunkte (Kugel, Torus): alle prüfen
+            cand = range(len(gfaces))
+        for gi in cand:
+            if f["feature"] is not None and gfaces[gi]["feature"] != f["feature"]:
+                continue
+            d = surface_distance(f["surface"], gfaces[gi]["pts"])
+            if d is not None and d > SURF_TOL:
+                continue
+            pairs.append((0 if d is not None else 1, bi, gi))
+    cands = defaultdict(list)
+    for _, bi, gi in sorted(pairs):
+        cands[bi].append(gi)
+    used, match = set(), {}
+    while cands:
+        bi = min(cands, key=lambda k: (sum(1 for g in cands[k] if g not in used), k))
+        free = [g for g in cands.pop(bi) if g not in used]
+        if free:
+            used.add(free[0])
+            match[free[0]] = bi
+    return match
+
+
+# ---------- Ergebnis ----------
+
+def read(path):
+    """Liest eine .ipt -> dict(bodies=[dict(verts[N,3] mm, tris[M,3], normals[N,3], colors=[rgba], color_idx[M])],
+    faces, matched). Wirft PartFileError (kein Anzeigenetz) bzw. InventorError."""
+    with open(path, "rb") as f:
+        data = f.read()
+    seg = segments(data)
+    gb = seg.get("PmGraphicsSegment")
+    if gb is None:
+        raise PartFileError("The Inventor part (.ipt) contains no display mesh. Open and save it in Inventor, "
+                            "or export it as STEP")
+    gfaces = graphic_faces(gb)
+    if not gfaces:
+        raise PartFileError("The Inventor part (.ipt) contains no display mesh. Open and save it in Inventor, "
+                            "or export it as STEP")
+    bfaces = brep_faces(seg.get("PmBRepSegment", b""))
+    match = match_faces(gfaces, bfaces)
+
+    app = seg.get("PmAppSegment")
+    states = material_states(gb)
+    offsets = [o for o, _ in states]
+    groups = defaultdict(list)
+    for gi, g in enumerate(gfaces):
+        bf = bfaces[match[gi]] if gi in match else None
+        rgba = None
+        if bf and bf["colors"]:
+            rgba = appearance_rgba(app, max(bf["colors"])[1])      # Stufe 2 (Fläche) vor 1 (Körper)
+        if rgba is None:
+            rgba = _material_before(states, offsets, g["mark"])
+        g["rgba"] = tuple(float(x) for x in rgba) if rgba else None
+        groups[bf["body"] if bf else None].append(g)
+
+    bodies = []
+    for key in sorted(groups, key=lambda k: (k is None, k or 0)):
+        gs = groups[key]
+        colors, verts, tris, normals, color_idx = [], [], [], [], []
+        base = 0
+        for g in gs:
+            if g["rgba"] not in colors:
+                colors.append(g["rgba"])
+            verts.append(g["pts"] * CM_TO_MM)
+            normals.append(g["nor"])
+            tris.append(g["idx"] + base)
+            color_idx.append(np.full(len(g["idx"]), colors.index(g["rgba"]), dtype=np.int32))
+            base += len(g["pts"])
+        bodies.append(dict(verts=np.concatenate(verts), tris=np.concatenate(tris), normals=np.concatenate(normals),
+                           colors=colors, color_idx=np.concatenate(color_idx)))
+    if not any(len(b["tris"]) for b in bodies):
+        raise InventorError("The Inventor part (.ipt) contains no triangles")
+    return dict(bodies=bodies, faces=len(gfaces), matched=len(match))

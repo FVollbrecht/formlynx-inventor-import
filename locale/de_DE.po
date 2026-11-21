@@ -1,0 +1,82 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "All parts in one collection"
+msgstr "Alle Teile in einer Collection"
+
+msgid "Assemblies"
+msgstr "Baugruppen"
+
+msgid "Auto"
+msgstr "Auto"
+
+msgid "Collections"
+msgstr "Collections"
+
+msgid "Could not read Inventor file: {name}"
+msgstr "Inventor-Datei nicht lesbar: {name}"
+
+msgid "Create materials from the colors in the file"
+msgstr "Materialien aus den Farben der Datei anlegen"
+
+msgid "Empties"
+msgstr "Empties"
+
+msgid "File is Y-up, parts are rotated to Z-up"
+msgstr "Datei ist Y-oben, Teile werden auf Z-oben gedreht"
+
+msgid "File is Z-up, like Blender"
+msgstr "Datei ist Z-oben, wie Blender"
+
+msgid "Flat"
+msgstr "Flach"
+
+msgid "Import Autodesk Inventor assemblies (.iam) and parts (.ipt) as meshes, no Inventor needed"
+msgstr "Autodesk-Inventor-Baugruppen (.iam) und -Bauteile (.ipt) als Meshes importieren, ohne Inventor"
+
+msgid "Import Inventor"
+msgstr "Inventor importieren"
+
+msgid "Imported {parts} parts"
+msgstr "{parts} Teile importiert"
+
+msgid "Imported {parts} parts, could not read: {name}"
+msgstr "{parts} Teile importiert, nicht lesbar: {name}"
+
+msgid "Imported {parts} parts, {count} incomplete meshes skipped"
+msgstr "{parts} Teile importiert, {count} unvollständige Netze übersprungen"
+
+msgid "Inventor (.iam, .ipt)"
+msgstr "Inventor (.iam, .ipt)"
+
+msgid "Inventor (.iam, .ipt, .dwf, .dwfx)"
+msgstr "Inventor (.iam, .ipt, .dwf, .dwfx)"
+
+msgid "Inventor parts (.ipt) without display mesh: open and save them in Inventor, or export them as STEP"
+msgstr "Inventor-Bauteile (.ipt) ohne Anzeigenetz: in Inventor öffnen und speichern oder als STEP exportieren"
+
+msgid "Materials"
+msgstr "Materialien"
+
+msgid "One collection per assembly"
+msgstr "Eine Collection je Baugruppe"
+
+msgid "Parts parented to one empty per assembly"
+msgstr "Teile an einem Empty je Baugruppe"
+
+msgid "Up axis of file"
+msgstr "Hochachse der Datei"
+
+msgid "Y"
+msgstr "Y"
+
+msgid "Z"
+msgstr "Z"
+
+msgid "Z-up like Inventor; DWF files state their own up axis"
+msgstr "Z oben wie in Inventor; DWF-Dateien geben ihre Hochachse selbst an"
+
+msgid "{name} (no display mesh)"
+msgstr "{name} (kein Anzeigenetz)"
+

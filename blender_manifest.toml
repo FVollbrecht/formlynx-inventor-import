@@ -1,0 +1,22 @@
+schema_version = "1.0.0"
+
+id = "formlynx_inventor_import"
+version = "1.0.0"
+name = "FORMLYNX Inventor Import"
+tagline = "Import Inventor assemblies and parts as meshes without Inventor"
+maintainer = "Frederik Vollbrecht"
+website = "https://modulynx-addon.netlify.app/"
+type = "add-on"
+
+tags = ["Import-Export"]
+
+blender_version_min = "4.5.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Frederik Vollbrecht"]
+
+[permissions]
+files = "Read Inventor files (.iam, .ipt) chosen by the user"
+
+[build]
+paths_exclude_pattern = ["__pycache__/"]
