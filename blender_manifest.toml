@@ -5,7 +5,7 @@ version = "1.0.0"
 name = "FORMLYNX Inventor Import"
 tagline = "Import Inventor assemblies and parts as meshes without Inventor"
 maintainer = "Frederik Vollbrecht"
-website = "https://modulynx-addon.netlify.app/"
+website = "https://github.com/FVollbrecht/formlynx-inventor-import"
 type = "add-on"
 
 tags = ["Import-Export"]
