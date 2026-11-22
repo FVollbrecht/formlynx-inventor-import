@@ -86,9 +86,12 @@ def _fill(mesh, body, scale, mats, items, materials, color_names=None):
     if materials:
         # ein Slot je Material (nicht je Teilnetz): gleiche Farben teilen sich den Slot
         slots, slot_of_item = {}, []
+        default = color_names.get(None) if color_names else None
         for it in items:
             info = mats.get(it["mat"])
-            if info and color_names and info.get("color"):
+            if default and not (info and info.get("color")):
+                info = dict(info or {}, color=default[1], name=default[0])    # Teildarstellung aus der .ipt
+            elif info and color_names and info.get("color"):
                 label = color_names.get(inventor_part.color_key(info["color"]))
                 if label:
                     info = dict(info, name=label)

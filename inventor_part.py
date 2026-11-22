@@ -402,7 +402,8 @@ def _part_appearance(app, props):
 
 def color_names(path):
     """Darstellungsnamen eines Teils nach Farbe -> {color_key: Name} (Teil-, Körper- und Flächendarstellungen).
-    Für Baugruppen: der Grafik-Cache kennt nur Farben."""
+    Für Baugruppen: der Grafik-Cache kennt nur Farben. Schlüssel None: (Name, rgb) der Teildarstellung – Ersatz,
+    wenn der Cache der Baugruppe für das Teil keine Farbe hat (iam/rottrans: Messing, Stahl)."""
     with open(path, "rb") as f:
         data = f.read()
     seg = segments(data)
@@ -416,6 +417,7 @@ def color_names(path):
     name, rgba = _part_appearance(app, inventor_props.read_cfb(Cfb(data)))
     if rgba:
         out.setdefault(color_key(rgba), name)
+        out[None] = (name, tuple(float(c) for c in rgba[:3]))
     return out
 
 

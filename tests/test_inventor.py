@@ -324,6 +324,13 @@ def test_inventor_rottrans():
     check("rottrans Import", info["names_ok"] and info["occurrences"] == 8 and info["part_files"] == 5, info)
     mats = {o.get("Material") for o in objs if o.type == 'MESH'}
     check("rottrans Materialien", mats == {"Stahl", "Stahl, Legierung", "Messing, weicher Gelbton"}, mats)
+    # Cache ohne Farbe für die Teile: Teildarstellung aus der .ipt statt IAM_default
+    slots = {o.name.split(" – ")[0].split(".")[0]: o.data.materials[0] for o in objs if o.type == 'MESH'}
+    brass = slots.get("Pasador")
+    check("rottrans Messing gelb", brass is not None and brass.name == "Messing - satiniert" and
+          abs(brass.diffuse_color[0] - 0.796) < 1e-3 and brass.diffuse_color[2] < 0.3, brass and brass.name)
+    check("rottrans keine Standardfarbe", not any(m.name.startswith("IAM_default") for m in slots.values()),
+          {k: m.name for k, m in slots.items()})
     rig = next((o for o in objs if o.type == 'ARMATURE'), None)
     check("rottrans Rig", rig is not None and info["couplings"] == 1 and info["loops"] == 1, info)
     # Mutter/Bolzen: Teile mit Arbeitsebene als Nebenkörper bekommen trotzdem eine Weltlage -> Joint Zylindrisch:14

@@ -8,6 +8,7 @@
 **Fixed**
 - Joints on parts that carry a work plane or a second small body were skipped. They now become bones.
 - A closed loop that ends in a cylindrical or slider joint now lets the part slide along that joint instead of holding it at one point.
+- Parts whose colour the assembly does not store (e.g. brass, steel) got the default grey. They now get the appearance from their part file.
 
 ## 1.1.0 – 2026-11-22
 
