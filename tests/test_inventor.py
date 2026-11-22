@@ -303,6 +303,76 @@ def test_inventor_rig():
         bpy.data.collections.remove(c)
 
 
+def test_inventor_rottrans():
+    """Bewegungs-Abhängigkeit Drehung/Translation und Materialien (testdaten/inventor/iam/rottrans: GrabCAD, nur lokal)"""
+    path = "I:/GIT/FORMLYNX/testdaten/inventor/iam/rottrans/Ensamblaje1.iam"
+    if not os.path.isfile(path):
+        print("testdaten/inventor/iam/rottrans fehlt – Drehung/Translation-Test übersprungen")
+        return
+    J = INV.inventor_rig.inventor_joints
+    found = J.read(INV.inventor_data.Cfb(open(path, "rb").read()))
+    rt = [j for j in found if j["kind"] == 'ROTATE_TRANSLATE']
+    check("rottrans erkannt", len(rt) == 1 and rt[0]["name"] == "Drehung/Translation:1",
+          [(j["name"], j["kind"]) for j in found])
+    # Inventor speichert cm: 1 mm Weg je Umdrehung
+    check("rottrans 1 mm je Umdrehung", rt and len(rt[0]["values"]) == 1 and abs(rt[0]["values"][0] * 10 - 1.0) < 1e-9,
+          rt and rt[0]["values"])
+    check("rottrans Teile", rt and sorted(s[0] for s in rt[0]["sides"]) == ["Perno:1", "Tuerca:1"], rt and rt[0]["sides"])
+    check("rottrans keine unbekannte Art", not any(j["kind"] == 'UNKNOWN' for j in found))
+    before = set(bpy.data.collections)
+    objs, info = INV.build(ctx, path)
+    check("rottrans Import", info["names_ok"] and info["occurrences"] == 8 and info["part_files"] == 5, info)
+    mats = {o.get("Material") for o in objs if o.type == 'MESH'}
+    check("rottrans Materialien", mats == {"Stahl", "Stahl, Legierung", "Messing, weicher Gelbton"}, mats)
+    rig = next((o for o in objs if o.type == 'ARMATURE'), None)
+    check("rottrans Rig", rig is not None and info["couplings"] == 1 and info["loops"] == 1, info)
+    # Mutter/Bolzen: Teile mit Arbeitsebene als Nebenkörper bekommen trotzdem eine Weltlage -> Joint Zylindrisch:14
+    pb = rig.pose.bones
+    check("rottrans Kopplung am Joint", "SCREW Zylindrisch:14" in pb and
+          abs(pb["Zylindrisch:14"].get("Inventor pitch mm", 0) - 1.0) < 1e-9, [b.name for b in pb])
+    # Eine Umdrehung (FK, Schleifen-IK stumm): Bolzen wandert 1 mm längs der Gelenkachse gegenüber der Mutter
+    for c in (c for b in pb for c in b.constraints if c.type == 'IK'):
+        c.mute = True
+    ctx.view_layer.update()
+    bolt = next(o for o in objs if o.type == 'MESH' and o.parent_bone == "SCREW Zylindrisch:14")
+    joint = pb["Zylindrisch:14"]
+    axis = (rig.matrix_world @ joint.tail - rig.matrix_world @ joint.head).normalized()
+    p0 = bolt.matrix_world.translation.copy()
+    joint.rotation_euler = (0, 2 * math.pi, 0)
+    ctx.view_layer.update()
+    shift = (bolt.matrix_world.translation - p0).dot(axis) / INV.mm_to_bu(sc, 1.0)
+    check("rottrans 1 mm je Umdrehung im Rig", abs(abs(shift) - 1.0) < 1e-4, shift)
+    joint.rotation_euler = (0, math.pi, 0)
+    ctx.view_layer.update()
+    half = (bolt.matrix_world.translation - p0).dot(axis) / INV.mm_to_bu(sc, 1.0)
+    check("rottrans halbe Umdrehung", abs(half - shift / 2) < 1e-4, half)
+    # Mit Schleifen-IK: Schleife schließt an Zylindrisch:13 längs der Achse -> Bolzen gleitet durch das Lager,
+    # der Rest der Mechanik bleibt stehen
+    joint.rotation_euler = (0, 0, 0)
+    for c in (c for b in pb for c in b.constraints if c.type == 'IK'):
+        c.mute = False
+    ctx.view_layer.update()
+    mm = INV.mm_to_bu(sc, 1.0)
+    others = {o.name: o.matrix_world.translation.copy() for o in objs
+              if o.type == 'MESH' and not o.name.startswith(("Perno", "Tuerca"))}
+    tip, pin = pb["TIP Zylindrisch:13"], pb["PIN Zylindrisch:13"]
+    check("rottrans Schleife gleitet", tip.constraints[0].use_stretch and tip.ik_stretch == 1.0)
+    joint.rotation_euler = (0, 2 * math.pi * 20, 0)       # 20 mm: weiter, als ein kurzer TIP schrumpfen könnte
+    ctx.view_layer.update()
+    moved = max((o.matrix_world.translation - others[o.name]).length for o in objs if o.name in others) / mm
+    check("rottrans Mechanik bleibt stehen", moved < 0.05, moved)
+    a, b = rig.matrix_world @ pin.head, rig.matrix_world @ (pin.tail - pin.head)
+    t = rig.matrix_world @ tip.tail
+    radial = (t - a).cross(b.normalized()).length / mm
+    check("rottrans Schleife auf der Achse", radial < 0.01, radial)
+    slide = (bolt.matrix_world.translation - p0).dot(axis) / mm
+    check("rottrans Bolzen gleitet 20 mm", abs(abs(slide) - 20.0) < 0.05, slide)
+    for o in objs:
+        bpy.data.objects.remove(o)
+    for c in set(bpy.data.collections) - before:
+        bpy.data.collections.remove(c)
+
+
 # Admin-Dashboard: FLX_ONLY=test_a,test_b wählt einzelne Tests; @@TEST-Zeilen melden den Fortschritt live
 FLX_ONLY = set(filter(None, os.environ.get("FLX_ONLY", "").split(",")))
 
@@ -322,7 +392,7 @@ def flx_run(name, func):
 
 
 try:
-    for test in (test_extension, test_inventor_import, test_inventor_rig):
+    for test in (test_extension, test_inventor_import, test_inventor_rig, test_inventor_rottrans):
         flx_run(test.__name__, test)
     bpy.ops.preferences.addon_disable(module=PKG)
     check("Extension sauber aus", not hasattr(bpy.types, "IVX_OT_import_inventor") and not menu_entries(), menu_entries())

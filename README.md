@@ -32,7 +32,8 @@ The importer reads the display data that Inventor saves inside every file. You g
 - Degrees of freedom as bone locks: revolute turns about its axis, cylindrical also slides along it, planar slides in its plane, ball turns freely, rigid joins parts without a bone
 - Joint limits become IK limits and a *Limit Rotation* constraint
 - IK controls on chains with at least two joints that turn about different axes
-- Closed loops are kept closed by an IK target
+- Closed loops are kept closed by an IK target; a loop closing on a cylindrical or slider joint can slide along it
+- Rotation-translation constraints (screw and nut): turning the joint slides the part by the pitch
 - The rest pose is the pose saved in Inventor – nothing moves on import
 
 **General**
@@ -42,7 +43,7 @@ The importer reads the display data that Inventor saves inside every file. You g
 ## Limits
 - A part without saved display data cannot be imported; the import names it and continues with the other files.
 - Geometry comes from the display cache, so it is a mesh, not an editable CAD model. The level of detail is the one Inventor used for display.
-- Joints: slider joints and distance limits of slider and cylindrical joints are not confirmed against real files yet. Assembly constraints (mate, flush, tangent, symmetry) are read but do not restrict the rig yet.
+- Joints: slider joints and distance limits of slider and cylindrical joints are not confirmed against real files yet. Assembly constraints (mate, flush, tangent, symmetry) are read but do not restrict the rig yet. Rotation-translation constraints on a cylindrical joint follow posed rotations, not IK.
 - Tested with files from Inventor 2023, 2025 and 2026. The file format is not documented; if a file cannot be read, the import names it and continues with the other files.
 
 ## Requirements

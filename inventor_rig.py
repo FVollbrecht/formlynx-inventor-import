@@ -9,7 +9,11 @@ Drehungen: IK-Sperren/IK-Grenzen plus Limit Rotation (auch für FK). Verschiebun
 gesperrten Achsen und Limit Location – der IK-Solver bewegt sie nicht (üblich in Mechanik-Rigs, FBX-tauglich).
 Spannbaum ab dem ersten Vorkommen je Gruppe (Inventor fixiert das erste Teil); Joints, die eine Schleife schließen,
 werden ein IK-Ziel: PIN-Bone an der einen Seite, TIP-Bone mit IK an der anderen (IK zielt auf den Kopf des Ziels).
-Abhängigkeiten (Passend, Fluchtend, …) werden gelesen, aber noch nicht übersetzt.
+Schließt die Schleife an einem Zylinder- oder Schiebe-Joint, darf der TIP-Bone längs der Achse dehnen (IK-Stretch nur
+an ihm): die Schleife hält dann die Achse, nicht einen Punkt – das Teil gleitet.
+Abhängigkeiten (Passend, Fluchtend, …) werden gelesen, aber noch nicht übersetzt. Ausnahme Drehung/Translation:
+liegt sie auf einem Zylinder-Joint, trägt ein Kind-Bone „SCREW …“ das Teil und ein Treiber schiebt ihn aus der
+Drehung des Joint-Bones (eigener Bone, sonst Abhängigkeitszyklus); Steigung je Umdrehung als Eigenschaft am Joint-Bone.
 """
 import math
 import re
@@ -111,19 +115,52 @@ def _size(handles):
     return size
 
 
+def _couple(obj, pb, screw, coupling, scale):
+    """Treiber am SCREW-Bone: Verschiebung längs Y = Drehung des Joint-Bones um Y / 2π · Steigung. Steigung (mm je
+    Umdrehung) steht am Joint-Bone, Vorzeichen dort umkehrbar. Wirkt auf die gestellte Drehung (FK), nicht auf IK."""
+    name, pitch = coupling
+    pb["Inventor coupling"] = name
+    pb["Inventor pitch mm"] = pitch
+    pb.lock_location = (True, True, True)       # Verschiebung kommt jetzt aus der Drehung
+    screw.lock_location = screw.lock_rotation = (True, True, True)
+    screw.lock_ik_x = screw.lock_ik_y = screw.lock_ik_z = True
+    bone = bpy.utils.escape_identifier(pb.name)
+    drv = screw.driver_add("location", 1).driver
+    drv.type = 'SCRIPTED'
+    for var_name, path in (("rot", f'pose.bones["{bone}"].rotation_euler[1]'),
+                           ("pitch", f'pose.bones["{bone}"]["Inventor pitch mm"]')):
+        var = drv.variables.new()
+        var.name, var.type = var_name, 'SINGLE_PROP'
+        var.targets[0].id = obj
+        var.targets[0].data_path = path
+    drv.expression = f"rot * pitch * {scale / (2 * math.pi)!r}"
+
+
 def build(context, cfb, occurrences, collection, name, scale):
     """Armature aus den Joints der Baugruppe. occurrences: {Schlüssel: Occurrence} in Einfügereihenfolge.
     -> (Armature-Objekt oder None, Info-dict)"""
     joints = inventor_joints.read(cfb)
     usable, info = _prepare(joints, occurrences, scale)
-    info.update(joints=0, loops=0, ik_chains=0)
+    info.update(joints=0, loops=0, ik_chains=0, couplings=0)
     if not usable:
         return None, info
+
+    # Drehung/Translation: Paar der Vorkommen -> Steigung in mm je Umdrehung (Inventor speichert cm)
+    couplings = {}
+    for j in joints:
+        if j["kind"] == 'ROTATE_TRANSLATE' and len(j["sides"]) == 2 and j["values"]:
+            pair = frozenset(id(occurrences.get(_key(n))) for n, _f in j["sides"])
+            couplings[pair] = (j["name"], j["values"][0] * 10.0)
+
+    def coupled(e):
+        return e["joint"]["kind"] == 'CYLINDRICAL' and frozenset((id(e["a"]), id(e["b"]))) in couplings
 
     adjacency = {}
     for e in usable:
         adjacency.setdefault(id(e["a"]), []).append(e)
         adjacency.setdefault(id(e["b"]), []).append(e)
+    for edges in adjacency.values():     # gekoppelte Joints zuerst: sie sollen Bones werden, kein Schleifenschluss
+        edges.sort(key=lambda e: not coupled(e))
 
     # Spannbaum je Gruppe, Wurzel = erstes Vorkommen in Einfügereihenfolge
     parent_of, children, tree, loops, roots = {}, {}, [], [], []
@@ -159,7 +196,7 @@ def build(context, cfb, occurrences, collection, name, scale):
     context.view_layer.objects.active = obj
     bpy.ops.object.mode_set(mode='EDIT')
     eb = arm.edit_bones
-    part_bone, joint_bones = {}, []
+    part_bone, joint_bones, screws = {}, [], {}
 
     def add(bname, head, axis, length, parent, roll_to=None):
         b = eb.new(bname)
@@ -188,6 +225,10 @@ def build(context, cfb, occurrences, collection, name, scale):
         length = max(_size(child.handles) * BONE_FRACTION, min_len)
         b = add(j["name"], w.translation.copy(), w.col[2].xyz, length, eb[part_bone[id(parent)]], w.col[0].xyz)
         part_bone[id(child)] = b.name
+        if coupled(e):
+            screw = add("SCREW " + j["name"], b.head.copy(), b.tail - b.head, length * 0.6, b, w.col[0].xyz)
+            part_bone[id(child)] = screw.name
+            screws[b.name] = screw.name
         joint_bones.append((b.name, j, e, child))
         info["joints"] += 1
 
@@ -199,7 +240,10 @@ def build(context, cfb, occurrences, collection, name, scale):
         # TIP an die Seite mit dem längeren Weg zur Wurzel: die IK-Kette soll möglichst viele Schleifengelenke enthalten
         if _depth(eb[part_bone[id(a)]]) > _depth(eb[part_bone[id(b)]]):
             a, b = b, a
+        sliding = j["kind"] in ('CYLINDRICAL', 'SLIDER')
         length = max(min(_size(a.handles), _size(b.handles)) * BONE_FRACTION * 0.5, min_len)
+        if sliding:                     # TIP dehnt/schrumpft beim Gleiten: Länge = Weg, den er schrumpfen kann
+            length = max(_size(a.handles), _size(b.handles), min_len)
         axis = w.col[2].xyz
         pin = add("PIN " + j["name"], w.translation.copy(), axis, length, eb[part_bone[id(a)]])
         tip = eb.new("TIP " + j["name"])
@@ -218,7 +262,7 @@ def build(context, cfb, occurrences, collection, name, scale):
         while x is not None and x.name not in ancestors:
             count += 1
             x = x.parent
-        ik_pairs.append((tip.name, pin.name, count))
+        ik_pairs.append((tip.name, pin.name, count, sliding))
         info["loops"] += 1
 
     # IK-Steuerung an Kettenenden mit mindestens zwei Drehgelenken
@@ -288,12 +332,20 @@ def build(context, cfb, occurrences, collection, name, scale):
             lim.min_y, lim.max_y = pb.ik_min_y, pb.ik_max_y
             lim.name = "Inventor limits"
 
-    for tip, pin, count in ik_pairs:
+    for bname, j, e, child in joint_bones:
+        if bname in screws:
+            _couple(obj, pose[bname], pose[screws[bname]], couplings[frozenset((id(e["a"]), id(e["b"])))], scale)
+            info["couplings"] += 1
+
+    for tip, pin, count, sliding in ik_pairs:
         pb = pose[tip]
         pb.lock_ik_x = pb.lock_ik_y = pb.lock_ik_z = True
         ik = pb.constraints.new('IK')
         ik.target, ik.subtarget = obj, pin
         ik.chain_count = count
+        ik.use_stretch = sliding
+        if sliding:
+            pb.ik_stretch = 1.0             # nur der TIP dehnt: Verschiebung längs der Gelenkachse
         ik.name = "Inventor loop"
     for bname, ctrl, depth in controls:
         ik = pose[bname].constraints.new('IK')

@@ -36,6 +36,7 @@ KINDS = {
     0x01: 'MATE', 0x02: 'FLUSH', 0x04: 'TANGENT', 0x14: 'SYMMETRY',
     0x0E: 'REVOLUTE', 0x10: 'RIGID', 0x11: 'BALL', 0x12: 'CYLINDRICAL', 0x13: 'PLANAR',
     0x0F: 'SLIDER',             # nicht gemessen: Lücke zwischen Drehbar und Starr
+    0x07: 'ROTATE_TRANSLATE',   # Bewegung Drehung/Translation, Wert = Weg je Umdrehung in cm (iam/rottrans/Ensamblaje1)
 }
 JOINTS = {'REVOLUTE', 'SLIDER', 'CYLINDRICAL', 'PLANAR', 'BALL', 'RIGID'}
 
@@ -233,6 +234,7 @@ ENTRY_CLASS = {
     'REVOLUTE': "AmRevoluteJointEntry", 'SLIDER': "AmTranslationJointEntry", 'CYLINDRICAL': "AmCylindricalJointEntry",
     'PLANAR': "AmPlanarJointEntry", 'BALL': "AmBallJointEntry", 'RIGID': "AmWeldJointEntry",
     'MATE': "AmMateEntry", 'FLUSH': "AmFlushEntry", 'TANGENT': "AmTangentEntry", 'SYMMETRY': "AmSymmetryEntry",
+    'ROTATE_TRANSLATE': "AmRelateRotateTranslateEntry",
 }
 
 

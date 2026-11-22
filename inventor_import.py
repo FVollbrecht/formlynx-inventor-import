@@ -232,6 +232,7 @@ def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, ipr
             created.append(parent)
         occ = inventor_rig.Occurrence(occurrence, [parent] if parent is not None else [], None)
         occurrences.setdefault(inventor_rig._key(info["name"] if info else occurrence), occ)
+        worlds = []
         for number, (node, items) in enumerate(bodies, 1):
             key = tuple(it["mesh"] for it in items)
             body = inventor_data.body_mesh(items, meshes)
@@ -261,6 +262,11 @@ def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, ipr
                 occ.handles.append(obj)
             if single:
                 occ.world = world.copy()
+            worlds.append((len(body[0]), world))
+        # Bauteil mit mehreren Körpern: der größte Körper liegt in Teil-Koordinaten (Nebenkörper wie Arbeitsebenen
+        # haben eigene Rahmen, gemessen an iam/rottrans) -> seine Lage gilt für die Joints des Vorkommens
+        if not single and worlds and not (info and info.get("assembly")):
+            occ.world = max(worlds, key=lambda w: w[0])[1].copy()
     found = sum(1 for v in part_files.cache.values() if v[0]) if part_files else 0
     rig_info = {}
     if joints and result["names_ok"]:
@@ -269,7 +275,7 @@ def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, ipr
             created.append(rig)
     return created, dict(skipped=skipped, names_ok=result["names_ok"], occurrences=len(groups), part_files=found,
                          joints=rig_info.get("joints", 0), loops=rig_info.get("loops", 0),
-                         constraints=rig_info.get("constraints", 0))
+                         constraints=rig_info.get("constraints", 0), couplings=rig_info.get("couplings", 0))
 
 
 @_zstd_cached
