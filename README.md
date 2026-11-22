@@ -4,7 +4,6 @@ A Blender extension that imports **Autodesk Inventor assemblies (.iam) and parts
 
 The importer reads the display data that Inventor saves inside every file. You get the shapes and colours you saw in Inventor: assemblies with the part names from the model browser, parts with one object per solid body and the colours of single faces. Joints of an assembly become an armature you can pose.
 
-<script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'F1F4LMSD0');kofiwidget2.draw();</script> 
 
 ![Inventor joints imported as a Blender rig](docs/rig.gif)
 
