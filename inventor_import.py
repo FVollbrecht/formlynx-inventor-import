@@ -9,6 +9,7 @@ Lesen in inventor_data/inventor_part (ohne bpy). Teile werden in Blender-Einheit
 teilen ein Mesh. Bauteile: ein Objekt je Volumenkörper, Farben je Fläche.
 """
 import functools
+import gc
 import math
 import ntpath
 import os
@@ -164,11 +165,19 @@ def _up_matrix(up, file_up_z=True):
 
 
 def _zstd_cached(fn):
-    """Segmente holen mehrere Leser (Namen, iProperties, Joints, Parameter): je Import nur einmal entpacken"""
+    """Segmente holen mehrere Leser (Namen, iProperties, Joints, Parameter): je Import nur einmal entpacken.
+    GC aus, solange gelesen wird: große Teile erzeugen Millionen kurzlebiger Objekte (B-Rep), die Sammlungen
+    kosteten dort rund 3 s."""
     @functools.wraps(fn)
     def run(*args, **kw):
-        with inventor_zstd.cached():
-            return fn(*args, **kw)
+        was = gc.isenabled()
+        gc.disable()
+        try:
+            with inventor_zstd.cached():
+                return fn(*args, **kw)
+        finally:
+            if was:
+                gc.enable()
     return run
 
 
@@ -383,11 +392,15 @@ class IVX_OT_import_inventor(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, rpt_("Could not read Inventor file: {name}").format(name=", ".join(failed + parts_only)))
             return {'CANCELLED'}
 
+        # nur die Wurzel wählen: Tausende gewählte Teile machen Workspace-Wechsel (Edit Mode für alle) und
+        # Viewport-Overlays sekundenlang langsam. Ohne gemeinsame Wurzel (Collections) nur das aktive Teil.
         for obj in context.selected_objects:
             obj.select_set(False)
-        for obj in created:
-            obj.select_set(True)
-        context.view_layer.objects.active = next((o for o in created if o.type == 'MESH'), created[0])
+        made = set(created)
+        roots = [o for o in created if o.parent not in made]
+        active = roots[0] if len(roots) == 1 else next((o for o in created if o.type == 'MESH'), created[0])
+        active.select_set(True)
+        context.view_layer.objects.active = active
         parts = sum(1 for o in created if o.type == 'MESH')
         problems = failed + [rpt_("{name} (no display mesh)").format(name=n) for n in parts_only]
         if problems:

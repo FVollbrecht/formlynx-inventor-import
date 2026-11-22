@@ -303,12 +303,27 @@ def test_inventor_rig():
         bpy.data.collections.remove(c)
 
 
+# Admin-Dashboard: FLX_ONLY=test_a,test_b wählt einzelne Tests; @@TEST-Zeilen melden den Fortschritt live
+FLX_ONLY = set(filter(None, os.environ.get("FLX_ONLY", "").split(",")))
+
+
+def flx_run(name, func):
+    if FLX_ONLY and name not in FLX_ONLY:
+        return
+    import time as _t
+    n, t0 = len(FAILS), _t.time()
+    print(f"@@TEST {name} START", flush=True)
+    try:
+        func()
+    except Exception:
+        check(name, False, traceback.format_exc())
+    bad = len(FAILS) - n
+    print(f"@@TEST {name} {'FAIL' if bad else 'OK'} {_t.time() - t0:.1f} 0 {bad}", flush=True)
+
+
 try:
     for test in (test_extension, test_inventor_import, test_inventor_rig):
-        try:
-            test()
-        except Exception:
-            check(test.__name__, False, traceback.format_exc())
+        flx_run(test.__name__, test)
     bpy.ops.preferences.addon_disable(module=PKG)
     check("Extension sauber aus", not hasattr(bpy.types, "IVX_OT_import_inventor") and not menu_entries(), menu_entries())
 except Exception:

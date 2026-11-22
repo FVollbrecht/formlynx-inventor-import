@@ -127,35 +127,46 @@ def _material_before(states, offsets, mark):
 # ---------- B-Rep (ASM/ACIS SAB) ----------
 
 def sab_entities(b):
-    """Entities als Token-Listen; Index = Zeigerwert in SAB (Kopf ist Entity 0). Historie wird nicht gelesen."""
+    """Entities -> (kinds, ptrs, toks), Index = Zeigerwert in SAB (Kopf ist Entity 0). Historie wird nicht gelesen.
+    kinds[i] = (Art, Unterart): letzter und erster Bezeichner vor dem ersten Wert ('face', 'attrib' … / 'plane' …).
+    ptrs[i] = Zeiger in Reihenfolge, toks[i] = übrige Werte als (Art, Wert) – Zeiger und Kopf getrennt, das spart
+    bei großen Teilen (Millionen Werte) die meiste Zeit."""
     i = b.find(b"ASM BinaryFile")
     if i < 0:
-        return []
+        return [], [], []
     o = i + len(b"ASM BinaryFile4") + 16
-    ents, cur, n = [], [], len(b)
-    add = cur.append
+    kinds, ptrs, toks, n = [], [], [], len(b)
+    head, ptr, cur = [], [], []
+    padd, add = ptr.append, cur.append
     i32, f64, v3, v2 = (struct.Struct(f).unpack_from for f in ("<i", "<d", "<3d", "<2d"))
     sizes = {0x07: 1, 0x08: 2, 0x09: 4, 0x12: 4}
     try:
         while o < n:
-            t = b[o]; o += 1
+            t = b[o]
+            o += 1
             if t == 0x0C:
-                add(("p", i32(b, o)[0])); o += 4
+                padd(i32(b, o)[0]); o += 4
             elif t == 0x04:
                 add(("i", i32(b, o)[0])); o += 4
             elif t == 0x06:
                 add(("d", f64(b, o)[0])); o += 8
             elif t in (0x0D, 0x0E):
                 ln = b[o]; o += 1
-                add(("id", b[o:o + ln].decode("latin-1"))); o += ln
+                word = b[o:o + ln].decode("latin-1"); o += ln
+                if ptr or cur:                              # Bezeichner nach dem ersten Wert: kein Kopf
+                    add(("id", word))
+                else:
+                    head.append(word)
             elif t == 0x11:
-                ents.append(cur); cur = []; add = cur.append
-                last = ents[-1]
-                if last and last[0][0] == "id" and last[0][1].startswith(("End", "Begin")):
-                    name = "-".join(v for k, v in last if k == "id")     # Bezeichner kommen als Einzelteile
+                if head and head[0].startswith(("End", "Begin")):
+                    name = "-".join(head + [v for k, v in cur if k == "id"])   # Bezeichner kommen als Einzelteile
                     if name.startswith(("End-of-ASM-data", "Begin-of-ASM-History")):
-                        ents.pop()
                         break
+                kinds.append((head[-1], head[0]) if head else ("", ""))
+                ptrs.append(ptr)
+                toks.append(cur)
+                head, ptr, cur = [], [], []
+                padd, add = ptr.append, cur.append
             elif t in (0x13, 0x14):
                 add(("v", v3(b, o))); o += 24
             elif t in (0x0A, 0x0B):
@@ -174,29 +185,19 @@ def sab_entities(b):
                 break                       # unbekanntes Tag: Rest nicht lesbar
     except struct.error:
         pass                                # abgeschnittene Daten: bis hierher verwenden
-    return ents
-
-
-def _kind(ent):
-    """(Art, Unterart): letzter Bezeichner vor dem ersten Wert ('face', 'attrib' …) und erster ('plane', …)."""
-    ids = []
-    for k, v in ent:
-        if k != "id":
-            break
-        ids.append(v)
-    return (ids[-1], ids[0]) if ids else ("", "")
+    return kinds, ptrs, toks
 
 
 def brep_faces(b):
     """-> Liste dict(body, points[N,3] cm, colors[(stufe, name)], feature, surface=(art, werte))."""
-    ents = sab_entities(b)
-    if not ents:
+    kind, ptrs, ents = sab_entities(b)
+    if not kind:
         return []
-    kind = [_kind(e) for e in ents]
-    ptrs = [[v for k, v in e if k == "p"] for e in ents]
+    count = len(kind)
+    kname = [k for k, _ in kind]
 
     def ptr_of(i, wanted):
-        return [p for p in ptrs[i] if 0 <= p < len(ents) and kind[p][0] == wanted]
+        return [p for p in ptrs[i] if 0 <= p < count and kname[p] == wanted]
 
     def body_of(face):
         shell = (ptr_of(face, "shell") or [None])[0]
@@ -204,7 +205,7 @@ def brep_faces(b):
         return (ptr_of(lump, "body") or [None])[0] if lump is not None else None
 
     loops_of, coedges_of = defaultdict(list), defaultdict(list)
-    for i, (k, _) in enumerate(kind):
+    for i, k in enumerate(kname):
         if k == "loop":
             f = ptr_of(i, "face")
             if f:
@@ -214,24 +215,35 @@ def brep_faces(b):
             if lp:
                 coedges_of[lp[0]].append(i)
 
+    edge_pts = {}
+
+    def points_of_edge(e):
+        """[(Punkt-Entity, Koordinaten)] der Eckpunkte einer Kante (jede Kante gehört zu zwei Flächen)"""
+        hit = edge_pts.get(e)
+        if hit is None:
+            hit = []
+            for v in ptr_of(e, "vertex"):
+                for p in ptr_of(v, "point"):
+                    vec = next((val for kk, val in ents[p] if kk == "v"), None)
+                    if vec:
+                        hit.append((p, vec))
+            edge_pts[e] = hit
+        return hit
+
     out = []
-    for f, (k, _) in enumerate(kind):
+    for f, k in enumerate(kname):
         if k != "face":
             continue
         pts = {}
         for lp in loops_of[f]:
             for ce in coedges_of[lp]:
                 for e in ptr_of(ce, "edge"):
-                    for v in ptr_of(e, "vertex"):
-                        for p in ptr_of(v, "point"):
-                            vec = next((val for kk, val in ents[p] if kk == "v"), None)
-                            if vec:
-                                pts[p] = vec
+                    pts.update(points_of_edge(e))
         # Attribut-Kette: ATTRIB_CUSTOM mit Flächenfarbe (Stufe 1 Körper/Feature, 2 Fläche) und Feature-ID
         colors, feature = [], None
         a = ptrs[f][0] if ptrs[f] else -1
         guard = 0
-        while 0 <= a < len(ents) and kind[a][0] == "attrib" and guard < 100:
+        while 0 <= a < count and kname[a] == "attrib" and guard < 100:
             strs = [v for kk, v in ents[a] if kk == "s"]
             ints = [v for kk, v in ents[a] if kk == "i"]
             if "INV_NMX_FACE_COLOR_ATTRIB" in strs and len(strs) > 1 and len(ints) > 3:
@@ -281,11 +293,18 @@ def surface_distance(surf, pts):
 
 # ---------- Darstellungen ----------
 
-def appearance_rgba(app, name):
+_RGBA = struct.Struct("<4f").unpack_from
+
+
+def appearance_rgba(app, name, memo=None):
     """Darstellungsname (Sprache der Inventor-Installation, wie im B-Rep) -> RGBA aus PmAppSegment oder None.
     Nach dem Namen folgt das Asset ('1:<Name>') und darin die erste RGBA mit a = 1."""
     if not app or not name:
         return None
+    if memo is not None:
+        if name not in memo:
+            memo[name] = appearance_rgba(app, name)
+        return memo[name]
     key = name.encode("utf-16le")
     marker = "1:".encode("utf-16le")
     start = 0
@@ -296,7 +315,7 @@ def appearance_rgba(app, name):
         asset = app.find(marker, k, k + 800)
         if asset >= 0:
             for o in range(asset, min(asset + 900, len(app) - 16)):
-                r, g, bl, a = struct.unpack_from("<4f", app, o)
+                r, g, bl, a = _RGBA(app, o)
                 if a == 1.0 and all(0.0 <= x <= 1.0 for x in (r, g, bl)) and max(r, g, bl) > 0.01:
                     return (r, g, bl, a)
         start = k + 2
@@ -329,6 +348,8 @@ def match_faces(gfaces, bfaces):
         for p in f["points"]:
             hit = faces_at(p)
             cand = hit if cand is None else cand & hit
+            if not cand:
+                break
         if cand is None:                      # Fläche ohne Eckpunkte (Kugel, Torus): alle prüfen
             cand = range(len(gfaces))
         for gi in cand:
@@ -421,12 +442,13 @@ def read(path):
     offsets = [o for o, _ in states]
     part_name, part_rgba = _part_appearance(app, props)
     groups = defaultdict(list)
+    memo = {}
     for gi, g in enumerate(gfaces):
         bf = bfaces[match[gi]] if gi in match else None
         rgba = name = None
         if bf and bf["colors"]:
             name = max(bf["colors"])[1]                              # Stufe 2 (Fläche) vor 1 (Körper)
-            rgba = appearance_rgba(app, name)
+            rgba = appearance_rgba(app, name, memo)
             if rgba is None:
                 name = None
         if rgba is None:
