@@ -59,6 +59,9 @@ To pose a rig, select the armature and switch to Pose Mode. Rotate a joint bone 
 ## Problems and questions
 Please open an [issue](../../issues). Name the Inventor version that saved the file and what went wrong. Attach a file only if you are allowed to share it.
 
+## Support
+The extension is free. If it saves you time, you can buy me a coffee on [Ko-fi](https://ko-fi.com/frederikv) – it helps to keep the importer up to date with new Inventor versions.
+
 ## Development
 This repository is the source of the extension.
 - Package: `python tools/build.py` creates `dist/formlynx_inventor_import-<version>.zip` with Blender's extension builder.
