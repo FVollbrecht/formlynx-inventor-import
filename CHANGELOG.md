@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 – unreleased
+## 1.1.0 – 2026-11-22
 
 **New**
 - **Joints as rig**: Inventor joints of an assembly become an armature with one bone per joint. Revolute, cylindrical, planar, ball and rigid joints get their degrees of freedom as bone locks, joint limits as IK limits. Closed loops are kept closed by an IK target. Option *Joints as Rig*, on by default.
@@ -9,6 +9,7 @@
 - Material names from the Inventor appearances.
 
 **Fixed**
+- After an import only the top object is selected. Thousands of selected parts made switching workspaces slow.
 - Files saved by **Inventor 2026** now import with part names. Inventor 2026 compresses its data with Zstandard, which the extension now unpacks itself.
 
 **Known limits**
