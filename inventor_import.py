@@ -8,6 +8,7 @@ ohne Inventor und ohne OpenCASCADE.
 Lesen in inventor_data/inventor_part (ohne bpy). Teile werden in Blender-Einheiten gebacken, gleiche Körper
 teilen ein Mesh. Bauteile: ein Objekt je Volumenkörper, Farben je Fläche.
 """
+import functools
 import math
 import ntpath
 import os
@@ -20,7 +21,7 @@ from bpy.types import OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix
 
-from . import inventor_data, inventor_part, inventor_props, inventor_rig
+from . import inventor_data, inventor_part, inventor_props, inventor_rig, inventor_zstd
 from ._compat import CTX, mm_to_bu, rpt_
 
 
@@ -162,6 +163,16 @@ def _up_matrix(up, file_up_z=True):
     return Matrix.Rotation(math.pi / 2, 4, 'X') if y_up else Matrix.Identity(4)
 
 
+def _zstd_cached(fn):
+    """Segmente holen mehrere Leser (Namen, iProperties, Joints, Parameter): je Import nur einmal entpacken"""
+    @functools.wraps(fn)
+    def run(*args, **kw):
+        with inventor_zstd.cached():
+            return fn(*args, **kw)
+    return run
+
+
+@_zstd_cached
 def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, iproperties=True, joints=True):
     """Liest die .iam und baut Objekte -> (Objektliste, Info-dict). Wirft inventor_data.InventorError.
     iproperties: Baugruppe an die Wurzel-Collection, Bauteile (wenn ihre Dateien auffindbar sind) an ihre Objekte.
@@ -252,6 +263,7 @@ def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, ipr
                          constraints=rig_info.get("constraints", 0))
 
 
+@_zstd_cached
 def build_part(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, iproperties=True):
     """Liest die .ipt und baut ein Objekt je Körper -> (Objektliste, Info-dict). Wirft inventor_data.InventorError"""
     result = inventor_part.read(path)

@@ -5,8 +5,10 @@
 """Zstandard-Entpacker in reinem Python (RFC 8878), ohne bpy und ohne Fremdpakete.
 
 Inventor 2026 packt RSeStorage-Segmente mit Zstandard; Blender-Python (3.11/3.13) hat dafür kein Modul.
-Nur Entpacken, ohne Wörterbücher. Die Segmente sind klein (KB bis wenige MB), Geschwindigkeit reicht.
+Nur Entpacken, ohne Wörterbücher. Bitleser mit Fenster (wenige from_bytes je Block), Huffman-Schleife ausgeschrieben.
+cached(): gleiche Ströme innerhalb eines Imports nur einmal entpacken (Segmente werden von mehreren Lesern geholt).
 """
+from contextlib import contextmanager
 
 
 class ZstdError(ValueError):
@@ -15,6 +17,8 @@ class ZstdError(ValueError):
 
 MAGIC = 0xFD2FB528
 MAX_OUTPUT = 512 << 20
+WINDOW = 56                     # Bytes je Fensterladung des Bitlesers
+_cache = None
 
 # Vordefinierte Verteilungen (RFC 8878, 3.1.1.3.2.2)
 LL_DEFAULT = (6, [4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
@@ -52,31 +56,43 @@ class _Forward:
 
 class _Backward:
     """Rückwärts gelesener Bitstrom (Huffman, FSE): beginnt unter dem höchsten gesetzten Bit des letzten Bytes.
-    Lesen über den Anfang hinaus liefert Nullen (pos wird negativ)."""
+    Lesen über den Anfang hinaus liefert Nullen (pos wird negativ). Fenster: Bits [lo, …) als eine Zahl."""
 
     def __init__(self, data):
         if not data or data[-1] == 0:
             raise ZstdError("bitstream without end mark")
         self.d = data
         self.pos = len(data) * 8 - 8 + data[-1].bit_length() - 1
+        self.lo = self.pos + 1                  # leeres Fenster: erster Zugriff lädt
+        self.win = 0
+
+    def _load(self, p):
+        b0 = max(0, (p >> 3) - WINDOW) if p > 0 else 0
+        self.win = int.from_bytes(self.d[b0:(self.pos >> 3) + 1], "little")
+        self.lo = b0 << 3
 
     def peek(self, n):
         p = self.pos - n
+        if p < self.lo and (self.lo or p >= 0):
+            self._load(p)
         if p >= 0:
-            b = p >> 3
-            return (int.from_bytes(self.d[b:b + ((p & 7) + n + 7) // 8], "little") >> (p & 7)) & ((1 << n) - 1)
-        have = self.pos
-        if have <= 0:
+            return (self.win >> (p - self.lo)) & ((1 << n) - 1)
+        if self.pos <= 0:
             return 0
-        v = int.from_bytes(self.d[0:(have + 7) // 8], "little") & ((1 << have) - 1)
-        return v << (-p)
+        return (self.win << -p) & ((1 << n) - 1)
 
     def read(self, n):
         if n == 0:
             return 0
-        v = self.peek(n)
-        self.pos -= n
-        return v
+        p = self.pos - n
+        if p < self.lo and (self.lo or p >= 0):
+            self._load(p)
+        self.pos = p
+        if p >= 0:
+            return (self.win >> (p - self.lo)) & ((1 << n) - 1)
+        if p + n <= 0:
+            return 0
+        return (self.win << -p) & ((1 << n) - 1)
 
 
 # ---------- FSE ----------
@@ -242,11 +258,19 @@ def _huffman_table(data, start):
 def _huffman_stream(src, count, table, out):
     max_bits, symbols, nbits = table
     br = _Backward(src)
+    d, pos, mask = br.d, br.pos, (1 << max_bits) - 1
+    lo, win = pos + 1, 0
+    append = out.append
     for _ in range(count):
-        k = br.peek(max_bits)
-        out.append(symbols[k])
-        br.pos -= nbits[k]
-    if br.pos != 0:
+        p = pos - max_bits
+        if p < lo and (lo or p >= 0):             # Fenster nachladen (ausgeschrieben: heißeste Schleife)
+            b0 = max(0, (p >> 3) - WINDOW) if p > 0 else 0
+            win = int.from_bytes(d[b0:(pos >> 3) + 1], "little")
+            lo = b0 << 3
+        k = (win >> (p - lo)) & mask if p >= 0 else (win << -p) & mask
+        append(symbols[k])
+        pos -= nbits[k]
+    if pos != 0:
         raise ZstdError("Huffman stream not fully consumed")
 
 
@@ -395,8 +419,29 @@ class _Frame:
         out += lits[lp:]
 
 
+@contextmanager
+def cached():
+    """Innerhalb des Blocks gleiche Eingaben nur einmal entpacken"""
+    global _cache
+    old, _cache = _cache, {}
+    try:
+        yield
+    finally:
+        _cache = old
+
+
 def decompress(data, max_output=MAX_OUTPUT):
     """Entpackt einen oder mehrere Zstandard-Frames (überspringbare Frames werden ausgelassen)"""
+    if _cache is not None:
+        key = bytes(data)
+        hit = _cache.get(key)
+        if hit is None or len(hit) > max_output:
+            hit = _cache[key] = _decompress(key, max_output)
+        return hit
+    return _decompress(data, max_output)
+
+
+def _decompress(data, max_output):
     data = memoryview(bytes(data)) if not isinstance(data, (bytes, bytearray)) else data
     result = bytearray()
     pos = 0

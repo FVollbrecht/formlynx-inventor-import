@@ -10,6 +10,8 @@ Farbwerte aus PmAppSegment (Darstellungen). Zuordnung B-Rep-Fläche <-> Grafikfl
 Prototyp mit Diagnose-Ausgabe: tools/ipt_probe.py.
 """
 import bisect
+import heapq
+import math
 import re
 import struct
 from collections import defaultdict
@@ -131,38 +133,43 @@ def sab_entities(b):
         return []
     o = i + len(b"ASM BinaryFile4") + 16
     ents, cur, n = [], [], len(b)
+    add = cur.append
+    i32, f64, v3, v2 = (struct.Struct(f).unpack_from for f in ("<i", "<d", "<3d", "<2d"))
+    sizes = {0x07: 1, 0x08: 2, 0x09: 4, 0x12: 4}
     try:
         while o < n:
             t = b[o]; o += 1
-            if t == 0x04:
-                cur.append(("i", struct.unpack_from("<i", b, o)[0])); o += 4
+            if t == 0x0C:
+                add(("p", i32(b, o)[0])); o += 4
+            elif t == 0x04:
+                add(("i", i32(b, o)[0])); o += 4
             elif t == 0x06:
-                cur.append(("d", struct.unpack_from("<d", b, o)[0])); o += 8
-            elif t in (0x07, 0x08, 0x09, 0x12):
-                size = {0x07: 1, 0x08: 2, 0x09: 4, 0x12: 4}[t]
-                ln = int.from_bytes(b[o:o + size], "little"); o += size
-                cur.append(("s", b[o:o + ln].decode("latin-1"))); o += ln
-            elif t in (0x0A, 0x0B):
-                cur.append(("b", t == 0x0B))
-            elif t == 0x0C:
-                cur.append(("p", struct.unpack_from("<i", b, o)[0])); o += 4
+                add(("d", f64(b, o)[0])); o += 8
             elif t in (0x0D, 0x0E):
                 ln = b[o]; o += 1
-                cur.append(("id", b[o:o + ln].decode("latin-1"))); o += ln
+                add(("id", b[o:o + ln].decode("latin-1"))); o += ln
+            elif t == 0x11:
+                ents.append(cur); cur = []; add = cur.append
+                last = ents[-1]
+                if last and last[0][0] == "id" and last[0][1].startswith(("End", "Begin")):
+                    name = "-".join(v for k, v in last if k == "id")     # Bezeichner kommen als Einzelteile
+                    if name.startswith(("End-of-ASM-data", "Begin-of-ASM-History")):
+                        ents.pop()
+                        break
+            elif t in (0x13, 0x14):
+                add(("v", v3(b, o))); o += 24
+            elif t in (0x0A, 0x0B):
+                add(("b", t == 0x0B))
+            elif t in sizes:
+                size = sizes[t]
+                ln = int.from_bytes(b[o:o + size], "little"); o += size
+                add(("s", b[o:o + ln].decode("latin-1"))); o += ln
             elif t in (0x0F, 0x10):
                 pass
-            elif t == 0x11:
-                ents.append(cur); cur = []
-                name = "-".join(v for k, v in ents[-1] if k == "id")     # Bezeichner kommen als Einzelteile
-                if name.startswith(("End-of-ASM-data", "Begin-of-ASM-History")):
-                    ents.pop()
-                    break
-            elif t in (0x13, 0x14):
-                cur.append(("v", struct.unpack_from("<3d", b, o))); o += 24
             elif t == 0x15:
-                cur.append(("e", struct.unpack_from("<i", b, o)[0])); o += 4
+                add(("e", i32(b, o)[0])); o += 4
             elif t == 0x16:
-                cur.append(("v2", struct.unpack_from("<2d", b, o))); o += 16
+                add(("v2", v2(b, o))); o += 16
             else:
                 break                       # unbekanntes Tag: Rest nicht lesbar
     except struct.error:
@@ -305,13 +312,15 @@ def match_faces(gfaces, bfaces):
         for p in np.floor(g["pts"] / POINT_TOL).astype(np.int64):
             grid[tuple(p)].add(gi)
 
+    empty = frozenset()
+
     def faces_at(p):
-        c = np.floor(np.asarray(p) / POINT_TOL).astype(np.int64)
+        cx, cy, cz = (math.floor(v / POINT_TOL) for v in p)
         hit = set()
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for dz in (-1, 0, 1):
-                    hit |= grid.get((c[0] + dx, c[1] + dy, c[2] + dz), set())
+                    hit |= grid.get((cx + dx, cy + dy, cz + dz), empty)
         return hit
 
     pairs = []
@@ -332,13 +341,28 @@ def match_faces(gfaces, bfaces):
     cands = defaultdict(list)
     for _, bi, gi in sorted(pairs):
         cands[bi].append(gi)
+    # Halde nach (freie Kandidaten, Index); Zähler sinken nur, veraltete Einträge werden übersprungen
+    free_count = {bi: len(gs) for bi, gs in cands.items()}
+    owners = defaultdict(list)
+    for bi, gs in cands.items():
+        for g in gs:
+            owners[g].append(bi)
+    heap = [(n, bi) for bi, n in free_count.items()]
+    heapq.heapify(heap)
     used, match = set(), {}
-    while cands:
-        bi = min(cands, key=lambda k: (sum(1 for g in cands[k] if g not in used), k))
+    while heap:
+        n, bi = heapq.heappop(heap)
+        if bi not in cands or n != free_count[bi]:
+            continue
         free = [g for g in cands.pop(bi) if g not in used]
         if free:
-            used.add(free[0])
-            match[free[0]] = bi
+            g = free[0]
+            used.add(g)
+            match[g] = bi
+            for other in owners[g]:
+                if other in cands:
+                    free_count[other] -= 1
+                    heapq.heappush(heap, (free_count[other], other))
     return match
 
 
