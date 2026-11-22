@@ -1,5 +1,5 @@
 # FORMLYNX Inventor Import
-[![Ko-fi](https://shields.io)](https://ko-fi.com)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F4LMSD0)
 
 
 A Blender extension that imports **Autodesk Inventor assemblies (.iam) and parts (.ipt)** as meshes – no Inventor installation, no OpenCASCADE, no internet connection.
