@@ -6,7 +6,7 @@
 
 Geometrie kommt aus dem Grafik-Cache, den Inventor für den Express-Modus in der Baugruppe speichert
 (CacheGraphics/OGSCache, bzip2): fertig tessellierte Netze plus Platzierung je Vorkommen, Einheit cm.
-Namen kommen aus dem Modellbrowser in der RSe-Datenbank (zlib). Das Format ist undokumentiert;
+Namen kommen aus dem Modellbrowser in der RSe-Datenbank (zlib, ab Inventor 2026 Zstandard). Das Format ist undokumentiert;
 die Erkenntnisse stammen aus dem Prototyp in AssemblyHTML (src/inventor, docs/Plan-Inventor-Import.md),
 getestet mit Inventor 2023.4 und 2025.4.
 
@@ -18,6 +18,8 @@ import struct
 import zlib
 
 import numpy as np
+
+from . import inventor_zstd
 
 OGS_PATH = "CacheGraphics/OGSCache/OGS/DefaultScene/streams"
 LWUFRX_PATH = "CacheGraphics/LWUFRx/streams"
@@ -155,6 +157,21 @@ class Cfb:
             return None
         start, size = entry
         return self._read_mini(start, size) if size < self.cutoff else self._read_chain(start, size)
+
+
+def unpack_segment(raw):
+    """RSeStorage-Daten-Stream (B…): 16 Byte GUID, u16 mit Packart im oberen Byte (1 zlib, 2 Zstandard), dann Daten.
+    -> entpackte Bytes oder None"""
+    if raw is None or len(raw) < 20:
+        return None
+    try:
+        if raw[17] == 2:
+            return inventor_zstd.decompress(raw[18:], MAX_UNPACKED)
+        if raw[18] == 0x78:
+            return zlib.decompressobj().decompress(raw[18:], MAX_UNPACKED)
+    except (zlib.error, inventor_zstd.ZstdError):
+        return None
+    return None
 
 
 def _bunzip(raw):
@@ -335,7 +352,7 @@ def _read_utf16_before(b, end):
     return None
 
 
-_ID_MARK = re.compile(rb"[\x0c\x0e]\x01\x00\x00\x00\x00\x00\x00..\x02\x00\x00\x30", re.S)
+_ID_MARK = re.compile(rb"[^\x00]\x01\x00\x00\x00\x00\x00\x00..\x02\x00\x00\x30", re.S)
 
 
 def parse_browser(b):
@@ -349,7 +366,7 @@ def parse_browser(b):
             if found:
                 name, start = found
                 # Objekt-ID: <Kennung> 01 00×6 <u16 id> 02 00 00 30, letztes Vorkommen vor dem Namen
-                # Kennung 0x0C (Inventor 2023), 0x0E (Inventor 2025)
+                # Kennung wechselt je Speicherstand (gesehen 0x0A–0x0E), daher beliebig außer 0
                 ident = -1
                 lo = max(0, start - 600)
                 for m in _ID_MARK.finditer(b, lo, start):
@@ -391,18 +408,14 @@ def read(path):
         raise InventorError("No graphics cache found in the Inventor file")
     nodes, meshes, mats = parse_scene(_bunzip(ogs))
 
-    # Browser-Stream suchen (18 Byte Kopf + zlib)
+    # Browser-Stream suchen (18 Byte Kopf + zlib/Zstandard)
     entries = []
     marker = "AmBrowserArrangement".encode("utf-16-le")
     for p in cfb.paths():
         if not re.fullmatch(r"RSeStorage/B[a-z0-9]+", p):
             continue
-        raw = cfb.get(p)
-        if len(raw) < 20 or raw[18] != 0x78:
-            continue
-        try:
-            dec = zlib.decompressobj().decompress(raw[18:], MAX_UNPACKED)
-        except zlib.error:
+        dec = unpack_segment(cfb.get(p))
+        if dec is None:
             continue
         if marker in dec:
             entries = parse_browser(dec)

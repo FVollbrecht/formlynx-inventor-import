@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "formlynx_inventor_import"
-version = "1.0.0"
+version = "1.1.0"
 name = "FORMLYNX Inventor Import"
 tagline = "Import Inventor assemblies and parts as meshes without Inventor"
 maintainer = "Frederik Vollbrecht"
@@ -19,4 +19,4 @@ copyright = ["2026 Frederik Vollbrecht"]
 files = "Read Inventor files (.iam, .ipt) chosen by the user"
 
 [build]
-paths_exclude_pattern = ["__pycache__/"]
+paths_exclude_pattern = ["__pycache__/", "/tests/", "/tools/", "/dist/", ".git*"]

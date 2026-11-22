@@ -2,10 +2,9 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 3 of the License, or
 # (at your option) any later version.
-"""FORMLYNX Inventor Import – freie Extension, gebaut aus MODULYNX (tools/build_inventor_ext.py).
+"""FORMLYNX Inventor Import – Autodesk-Inventor-Baugruppen (.iam) und -Bauteile (.ipt) als Meshes, ohne Inventor.
 
-Quelle ist modulynx/inventor_import.py + inventor_data.py + inventor_part.py; hier nicht von Hand ändern, nur die Vorlage in
-modulynx/tools/inventor_ext/.
+Quelle ist dieses Repo. Tests: tests/test_inventor.py (t.sh inventor), Paket: tools/build.py.
 """
 import bpy
 

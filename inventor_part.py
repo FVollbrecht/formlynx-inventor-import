@@ -12,12 +12,12 @@ Prototyp mit Diagnose-Ausgabe: tools/ipt_probe.py.
 import bisect
 import re
 import struct
-import zlib
 from collections import defaultdict
 
 import numpy as np
 
-from .inventor_data import Cfb, InventorError, PartFileError
+from . import inventor_props
+from .inventor_data import Cfb, InventorError, PartFileError, unpack_segment
 
 HEAD = b"\x02\x00\x00\x30"
 # Kopf eines Flächen-Eintrags: Feld (k, k, 0x10000000) mit k Paaren (Feature-ID u32, ffffffff), meist k = 1.
@@ -26,12 +26,13 @@ FACE_MARK = re.compile(rb"\x02\x00\x00\x30([\x01-\x40])\x00\x00\x00\1\x00\x00\x0
 POINT_TOL = 1e-3             # cm: B-Rep-Eckpunkt liegt im Grafiknetz
 SURF_TOL = 2e-3              # cm: Netzpunkte liegen auf der B-Rep-Fläche
 CM_TO_MM = 10.0
+NORMAL_TOL = 1e-3            # Normalen-Array: alle Vektoren Länge 1
 
 
 # ---------- Datei ----------
 
 def segments(data):
-    """{Segmentname: entpackte Bytes} aus RSeStorage (Meta-Stream M…: Name UTF-16, Daten-Stream B…: 18 Byte Kopf + zlib)."""
+    """{Segmentname: entpackte Bytes} aus RSeStorage (Meta-Stream M…: Name UTF-16, Daten-Stream B…: 18 Byte Kopf + zlib/Zstandard)."""
     cfb = Cfb(data)
     out = {}
     for p in cfb.paths():
@@ -40,9 +41,8 @@ def segments(data):
             raw = cfb.get("RSeStorage/B" + p[12:])
             if not words or raw is None:
                 continue
-            try:
-                raw = zlib.decompressobj().decompress(raw[18:])
-            except zlib.error:
+            raw = unpack_segment(raw)
+            if raw is None:
                 continue
             out.setdefault(words[0].decode("utf-16le"), raw)
     return out
@@ -64,29 +64,33 @@ def _arrays(b):
 
 def graphic_faces(b):
     """Flächen des Anzeigenetzes: dict(mark, feature, pts[N,3] cm, idx[M,3], nor[N,3]).
-    Satz = Positionen (Typ t), Indizes u32 (kleiner Typ), Normalen (t+1) gleicher Anzahl; t hängt von der Version ab.
+    Satz = Positionen (n Punkte), Indizes u32 (kleiner Typ), Normalen (n Vektoren Länge 1), Zusatz-Array (n).
+    Die Typnummern vergibt jede Datei selbst (2017–2025 gesehen: Normalen t+1 oder t+6) -> nur der Aufbau zählt.
     Je Flächen-Eintrag erst die feine, dann die grobe Stufe -> nur der erste Satz zählt."""
     marks = [mm.start() for mm in FACE_MARK.finditer(b)]
     arr = _arrays(b)
     out, seen = [], set()
     for i, (o, t, n) in enumerate(arr):
-        if not (t > 250 and i + 2 < len(arr) and arr[i + 1][1] < 16 and arr[i + 2][1] == t + 1 and arr[i + 2][2] == n):
+        if not (t > 250 and i + 2 < len(arr) and arr[i + 1][1] < 16 and arr[i + 2][1] > 250 and arr[i + 2][2] == n):
             continue
         k = bisect.bisect_left(marks, o) - 1
         if k < 0 or marks[k] in seen:
             continue
         io, _, ni = arr[i + 1]
-        if ni % 3 or io + 16 + ni * 4 > len(b) or o + 16 + n * 12 > len(b):
+        no = arr[i + 2][0]
+        if ni % 3 or io + 16 + ni * 4 > len(b) or o + 16 + n * 12 > len(b) or no + 16 + n * 12 > len(b):
+            continue
+        nor = np.frombuffer(b, "<f4", n * 3, no + 16).reshape(-1, 3).astype(np.float64)
+        if not np.all(np.abs(np.linalg.norm(nor, axis=1) - 1.0) < NORMAL_TOL):
             continue
         idx = np.frombuffer(b, "<u4", ni, io + 16)
         if ni and idx.max() >= n:
             continue
         seen.add(marks[k])
-        no = arr[i + 2][0]
         out.append(dict(mark=marks[k], feature=struct.unpack_from("<I", b, marks[k] + 16)[0],
                         pts=np.frombuffer(b, "<f4", n * 3, o + 16).reshape(-1, 3).astype(np.float64),
                         idx=idx.reshape(-1, 3).astype(np.int64),
-                        nor=np.frombuffer(b, "<f4", n * 3, no + 16).reshape(-1, 3).astype(np.float64)))
+                        nor=nor))
     return out
 
 
@@ -340,12 +344,43 @@ def match_faces(gfaces, bfaces):
 
 # ---------- Ergebnis ----------
 
-def read(path):
-    """Liest eine .ipt -> dict(bodies=[dict(verts[N,3] mm, tris[M,3], normals[N,3], colors=[rgba], color_idx[M])],
-    faces, matched). Wirft PartFileError (kein Anzeigenetz) bzw. InventorError."""
+def color_key(rgb):
+    """Farbe -> Schlüssel für den Namensvergleich (Grafik-Cache und Teil speichern float32)"""
+    return tuple(round(float(c), 3) for c in rgb[:3])
+
+
+def _part_appearance(app, props):
+    """Teildarstellung (iProperty Appearance) -> (Name, rgba) oder (Name, None)"""
+    name = props.get("Appearance")
+    return name, appearance_rgba(app, name) if name else None
+
+
+def color_names(path):
+    """Darstellungsnamen eines Teils nach Farbe -> {color_key: Name} (Teil-, Körper- und Flächendarstellungen).
+    Für Baugruppen: der Grafik-Cache kennt nur Farben."""
     with open(path, "rb") as f:
         data = f.read()
     seg = segments(data)
+    app = seg.get("PmAppSegment")
+    out = {}
+    names = {name for bf in brep_faces(seg.get("PmBRepSegment", b"")) for _, name in bf["colors"]}
+    for name in sorted(names):
+        rgba = appearance_rgba(app, name)
+        if rgba:
+            out.setdefault(color_key(rgba), name)
+    name, rgba = _part_appearance(app, inventor_props.read_cfb(Cfb(data)))
+    if rgba:
+        out.setdefault(color_key(rgba), name)
+    return out
+
+
+def read(path):
+    """Liest eine .ipt -> dict(bodies=[dict(verts[N,3] mm, tris[M,3], normals[N,3], colors=[rgba], names=[str|None],
+    color_idx[M])], faces, matched, props). Wirft PartFileError (kein Anzeigenetz) bzw. InventorError."""
+    with open(path, "rb") as f:
+        data = f.read()
+    seg = segments(data)
+    props = inventor_props.read_cfb(Cfb(data))
     gb = seg.get("PmGraphicsSegment")
     if gb is None:
         raise PartFileError("The Inventor part (.ipt) contains no display mesh. Open and save it in Inventor, "
@@ -360,32 +395,45 @@ def read(path):
     app = seg.get("PmAppSegment")
     states = material_states(gb)
     offsets = [o for o, _ in states]
+    part_name, part_rgba = _part_appearance(app, props)
     groups = defaultdict(list)
     for gi, g in enumerate(gfaces):
         bf = bfaces[match[gi]] if gi in match else None
-        rgba = None
+        rgba = name = None
         if bf and bf["colors"]:
-            rgba = appearance_rgba(app, max(bf["colors"])[1])      # Stufe 2 (Fläche) vor 1 (Körper)
+            name = max(bf["colors"])[1]                              # Stufe 2 (Fläche) vor 1 (Körper)
+            rgba = appearance_rgba(app, name)
+            if rgba is None:
+                name = None
         if rgba is None:
             rgba = _material_before(states, offsets, g["mark"])
+        if rgba is None and states:     # neuere Dateien: Teilfarbe steht erst hinter den Flächen
+            rgba = states[0][1]
         g["rgba"] = tuple(float(x) for x in rgba) if rgba else None
+        # Farbe aus dem Grafiksegment trägt keinen Namen: gleich der Teildarstellung -> deren Name
+        if name is None and rgba and part_rgba and color_key(rgba) == color_key(part_rgba):
+            name = part_name
+        g["name"] = name
         groups[bf["body"] if bf else None].append(g)
 
     bodies = []
     for key in sorted(groups, key=lambda k: (k is None, k or 0)):
         gs = groups[key]
-        colors, verts, tris, normals, color_idx = [], [], [], [], []
+        colors, names, verts, tris, normals, color_idx = [], [], [], [], [], []
         base = 0
         for g in gs:
             if g["rgba"] not in colors:
                 colors.append(g["rgba"])
+                names.append(g["name"])
+            elif g["name"] and not names[colors.index(g["rgba"])]:
+                names[colors.index(g["rgba"])] = g["name"]
             verts.append(g["pts"] * CM_TO_MM)
             normals.append(g["nor"])
             tris.append(g["idx"] + base)
             color_idx.append(np.full(len(g["idx"]), colors.index(g["rgba"]), dtype=np.int32))
             base += len(g["pts"])
         bodies.append(dict(verts=np.concatenate(verts), tris=np.concatenate(tris), normals=np.concatenate(normals),
-                           colors=colors, color_idx=np.concatenate(color_idx)))
+                           colors=colors, names=names, color_idx=np.concatenate(color_idx)))
     if not any(len(b["tris"]) for b in bodies):
         raise InventorError("The Inventor part (.ipt) contains no triangles")
-    return dict(bodies=bodies, faces=len(gfaces), matched=len(match))
+    return dict(bodies=bodies, faces=len(gfaces), matched=len(match), props=props)

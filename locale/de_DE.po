@@ -47,14 +47,17 @@ msgstr "{parts} Teile importiert, nicht lesbar: {name}"
 msgid "Imported {parts} parts, {count} incomplete meshes skipped"
 msgstr "{parts} Teile importiert, {count} unvollständige Netze übersprungen"
 
+msgid "Imported {parts} parts, {count} joints as rig"
+msgstr "{parts} Teile importiert, {count} Gelenke als Rig"
+
 msgid "Inventor (.iam, .ipt)"
 msgstr "Inventor (.iam, .ipt)"
 
-msgid "Inventor (.iam, .ipt, .dwf, .dwfx)"
-msgstr "Inventor (.iam, .ipt, .dwf, .dwfx)"
-
 msgid "Inventor parts (.ipt) without display mesh: open and save them in Inventor, or export them as STEP"
 msgstr "Inventor-Bauteile (.ipt) ohne Anzeigenetz: in Inventor öffnen und speichern oder als STEP exportieren"
+
+msgid "Joints as Rig"
+msgstr "Gelenke als Rig"
 
 msgid "Materials"
 msgstr "Materialien"
@@ -74,8 +77,11 @@ msgstr "Y"
 msgid "Z"
 msgstr "Z"
 
-msgid "Z-up like Inventor; DWF files state their own up axis"
-msgstr "Z oben wie in Inventor; DWF-Dateien geben ihre Hochachse selbst an"
+msgid "Z-up like Inventor"
+msgstr "Z oben wie in Inventor"
+
+msgid "iProperties"
+msgstr "iProperties"
 
 msgid "{name} (no display mesh)"
 msgstr "{name} (kein Anzeigenetz)"
