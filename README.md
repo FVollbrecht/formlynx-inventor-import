@@ -1,6 +1,7 @@
 # FORMLYNX Inventor Import
 [![Ko-fi](https://shields.io)](https://ko-fi.com)
 
+
 A Blender extension that imports **Autodesk Inventor assemblies (.iam) and parts (.ipt)** as meshes – no Inventor installation, no OpenCASCADE, no internet connection.
 
 The importer reads the display data that Inventor saves inside every file. You get the shapes and colours you saw in Inventor: assemblies with the part names from the model browser, parts with one object per solid body and the colours of single faces. Joints of an assembly become an armature you can pose.
