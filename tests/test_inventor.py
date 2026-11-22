@@ -408,6 +408,7 @@ def test_inventor_loops():
     before = set(bpy.data.collections)
     objs, info = INV.build(ctx, path)
     rig = next((o for o in objs if o.type == 'ARMATURE'), None)
+    check("loops Arbeitsebenen nicht als unvollständig gemeldet", info["skipped"] == 0, info["skipped"])
     check("loops Rig", rig is not None and info["loops"] == 4 and info["couplings"] == 1 and info["joints"] == 7, info)
     pb = rig.pose.bones
     check("loops Perno als Bone", "Zylindrisch:13" in pb and "SCREW Zylindrisch:14" in pb, [b.name for b in pb])

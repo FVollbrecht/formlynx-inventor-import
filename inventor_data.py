@@ -314,7 +314,13 @@ def parse_scene(d):
 
 def _read_mesh(m, blob):
     """Position (mm), Normale und Dreiecksindizes aus dem Datenblock; bei Fehlern m['error']"""
-    if m["kind"] != "faces" or m.get("v_size") is None or m.get("i_size") is None:
+    if m["kind"] != "faces" or m.get("v_size") is None:
+        return
+    if m.get("i_size") is None:
+        # ohne Indexpuffer und ohne Normalen = Arbeitsebene (2 Dreiecke Position+UV) bzw. ihr Umriss (Linien),
+        # gemessen an iam/rottrans: kein Körper, nicht als „unvollständig“ melden
+        if (m.get("attrs") or 0) < 3:
+            m["reference"] = True
         return
     if m["v_off"] + m["v_size"] > len(blob) or m["i_off"] + m["i_size"] > len(blob):
         m["error"] = "buffer out of range"

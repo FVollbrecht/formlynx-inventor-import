@@ -209,7 +209,8 @@ def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, ipr
     groups, skipped = {}, 0
     for node in nodes:
         items = [it for it in node["items"] if "position" in meshes.get(it["mesh"], {})]
-        skipped += len(node["items"]) - len(items)
+        skipped += sum(1 for it in node["items"] if "position" not in meshes.get(it["mesh"], {})
+                       and not meshes.get(it["mesh"], {}).get("reference"))
         if items:
             top = node["path"].split(":")[0] if node["path"] else ""
             groups.setdefault(top, []).append((node, items))
