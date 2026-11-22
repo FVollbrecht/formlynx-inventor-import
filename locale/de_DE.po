@@ -86,3 +86,11 @@ msgstr "iProperties"
 msgid "{name} (no display mesh)"
 msgstr "{name} (kein Anzeigenetz)"
 
+msgid "Bake Inventor Rig"
+msgstr "Inventor-Rig backen"
+
+msgid "Solve the loops of the active Inventor rig for every frame of the scene range and key all joint values"
+msgstr "Schleifen des aktiven Inventor-Rigs für jedes Bild des Szenenbereichs lösen und alle Gelenkwerte keyen"
+
+msgid "No loop model on this rig"
+msgstr "Dieses Rig hat kein Schleifenmodell"

@@ -3,6 +3,7 @@
 BLENDER_USER_RESOURCES=<leerer ordner> blender -b --factory-startup --python tests/test_inventor.py -- <ext.zip>
 (t.sh inventor baut das Paket und ruft das auf). Testdateien nur lokal in I:/GIT/FORMLYNX/testdaten/inventor.
 """
+import json
 import math
 import os
 import re
@@ -163,6 +164,15 @@ ZSTD_SAMPLE = bytes.fromhex(
     "53240195a4cf59b3952c4546ae4830be303d3e9ab22f3d768b086d5f7ce775df7d70d41c89511b8a9c5dca0302003e00222352cd3a")
 
 
+def _vals(rig, M):
+    return INV.inventor_live._read(rig, M)
+
+
+def _loop_mm(M, q, mm):
+    """Größter Lagefehler aller Schleifen in mm"""
+    return max((p / mm for _n, p, _a in M.loop_errors(q)), default=0.0)
+
+
 def test_inventor_rig():
     """Inventor-Joints -> Armature (testdaten/inventor/iam/joints: eigene Testbaugruppe, Inventor 2026, Zstandard)"""
     Z = sys.modules[PKG + ".inventor_zstd"]
@@ -198,19 +208,26 @@ def test_inventor_rig():
     finally:
         J.read = real_read
     check("rig Schleife erkannt", info["loops"] == 1 and info["joints"] == 3, info)
-    tip = next(b for b in rig.pose.bones if b.name.startswith("TIP "))
-    ik = tip.constraints[0]
-    check("rig Schleife IK-Kette", ik.type == 'IK' and ik.chain_count >= 3, ik.chain_count)
-    # Antrieb über das Gelenk außerhalb der IK-Kette drehen, Schleife muss geschlossen bleiben
-    pin = rig.pose.bones[ik.subtarget]
-    driver = next(b for b in rig.pose.bones if b.get("mlx_inventor_joint") and b.name not in
-                  {x.name for x in tip.parent_recursive})
+    LIVE = INV.inventor_live
+    mm = INV.mm_to_bu(sc, 1.0)
+    M = LIVE.inventor_solver.Model(json.loads(rig["inventor_solver"]))
+    check("rig Modell vorhanden", len(M.loops) == 1 and len(M.vars) == 3 and
+          not any(b.name.startswith(("TIP ", "PIN ")) for b in rig.pose.bones), (len(M.loops), len(M.vars)))
+    # Antrieb (erste Variable, die die Schleife berührt) um 15 drehen, Schleife muss geschlossen bleiben
+    driver = rig.pose.bones[M.bones[M.vars[0][0]]["name"]]
+    before = _vals(rig, M)
     driver.rotation_euler = (0, math.radians(15), 0)
+    LIVE.solve_rig(rig, sc)
+    q = _vals(rig, M)
+    check("rig Schleife geschlossen", _loop_mm(M, q, sc_mm) < 0.05, _loop_mm(M, q, sc_mm))
+    check("rig Schleife bewegt", max(abs(q[n] - before[n]) for n in range(1, len(q))) > math.radians(1), (before, q))
+    # Live per Handler: Wert setzen + Depsgraph-Update löst die Schleife ohne Aufruf von solve_rig
+    LIVE._last[rig.as_pointer()] = _vals(rig, M)
+    driver.rotation_euler = (0, math.radians(30), 0)
     ctx.view_layer.update()
-    gap = (rig.matrix_world @ tip.tail - rig.matrix_world @ pin.head).length
-    check("rig Schleife geschlossen", gap < INV.mm_to_bu(sc, 0.05), gap / sc_mm)
-    moved = (rig.matrix_world @ pin.head - Vector((50 * sc_mm, 35 * sc_mm, 0))).length
-    check("rig Schleife bewegt", moved > INV.mm_to_bu(sc, 1.0), moved / sc_mm)
+    q2 = _vals(rig, M)
+    check("rig Handler schließt Schleife", _loop_mm(M, q2, sc_mm) < 0.05 and abs(q2[0] - math.radians(30)) < 1e-5 and
+          max(abs(q2[n] - q[n]) for n in range(1, len(q2))) > math.radians(1), (_loop_mm(M, q2, sc_mm), q, q2))
     for o in objs + [rig]:
         bpy.data.objects.remove(o)
 
@@ -242,7 +259,9 @@ def test_inventor_rig():
     lim = pb["Test_Drehen_90"]
     check("rig Grenzen", lim.use_ik_limit_y and abs(lim.ik_min_y + math.pi / 2) < 1e-5 and abs(lim.ik_max_y) < 1e-6,
           (lim.ik_min_y, lim.ik_max_y))
+    # Ohne Schleife: kein Löser-Modell, die IK-Steuerung am Kettenende bleibt (Schleifen-Ketten haben keine, siehe Viergelenk)
     check("rig IK-Kette", [c.chain_count for c in pb["Kugelförmig:1"].constraints if c.type == 'IK'] == [3])
+    check("rig ohne Schleife kein Modell", "inventor_solver" not in rig and info["loops"] == 0, info)
     # Ohne IK: Bone um -45° -> Inventor-Winkel +45°, Gelenkursprünge bleiben deckungsgleich
     for c in (c for b in pb for c in b.constraints if c.type == 'IK'):
         c.mute = True
@@ -353,27 +372,62 @@ def test_inventor_rottrans():
     ctx.view_layer.update()
     half = (bolt.matrix_world.translation - p0).dot(axis) / INV.mm_to_bu(sc, 1.0)
     check("rottrans halbe Umdrehung", abs(half - shift / 2) < 1e-4, half)
-    # Mit Schleifen-IK: Schleife schließt an Zylindrisch:13 längs der Achse -> Bolzen gleitet durch das Lager,
-    # der Rest der Mechanik bleibt stehen
-    joint.rotation_euler = (0, 0, 0)
-    for c in (c for b in pb for c in b.constraints if c.type == 'IK'):
-        c.mute = False
-    ctx.view_layer.update()
+    # Schleifen-Löser: Zylindrisch:14 schrittweise auf 1890 Grad (5,25 Umdrehungen) drehen -> alle Schleifen
+    # schließen, Schraubengelenk 14 wandert +5,25 mm (float32 beim Drehwinkel)
+    LIVE = INV.inventor_live
     mm = INV.mm_to_bu(sc, 1.0)
-    others = {o.name: o.matrix_world.translation.copy() for o in objs
-              if o.type == 'MESH' and not o.name.startswith(("Perno", "Tuerca"))}
-    tip, pin = pb["TIP Zylindrisch:13"], pb["PIN Zylindrisch:13"]
-    check("rottrans Schleife gleitet", tip.constraints[0].use_stretch and tip.ik_stretch == 1.0)
-    joint.rotation_euler = (0, 2 * math.pi * 20, 0)       # 20 mm: weiter, als ein kurzer TIP schrumpfen könnte
+    M = LIVE.inventor_solver.Model(json.loads(rig["inventor_solver"]))
+    joint.rotation_euler = (0, 0, 0)
+    drive = pb["Zylindrisch:14"]
+    drive.rotation_mode = 'XYZ'
+    LIVE._last.pop(rig.as_pointer(), None)
+    for deg in range(30, 1891, 30):
+        drive.rotation_euler = (0, math.radians(deg), 0)
+        LIVE.solve_rig(rig, sc)
+    q = _vals(rig, M)
+    errs = M.loop_errors(q)
+    check("rottrans Schleifen geschlossen", errs and all(p / mm < 0.05 and a < 0.1 for _n, p, a in errs),
+          [(n, p / mm, a) for n, p, a in errs])
     ctx.view_layer.update()
-    moved = max((o.matrix_world.translation - others[o.name]).length for o in objs if o.name in others) / mm
-    check("rottrans Mechanik bleibt stehen", moved < 0.05, moved)
-    a, b = rig.matrix_world @ pin.head, rig.matrix_world @ (pin.tail - pin.head)
-    t = rig.matrix_world @ tip.tail
-    radial = (t - a).cross(b.normalized()).length / mm
-    check("rottrans Schleife auf der Achse", radial < 0.01, radial)
-    slide = (bolt.matrix_world.translation - p0).dot(axis) / mm
-    check("rottrans Bolzen gleitet 20 mm", abs(abs(slide) - 20.0) < 0.05, slide)
+    shift = pb["SCREW Zylindrisch:14"].location[1] / mm
+    check("rottrans Schraube 5,25 mm", abs(shift - 5.25) < 0.02, shift)
+    check("rottrans Antrieb gehalten", abs(math.degrees(drive.rotation_euler[1]) - 1890) < 0.01, math.degrees(drive.rotation_euler[1]))
+    for o in objs:
+        bpy.data.objects.remove(o)
+    for c in set(bpy.data.collections) - before:
+        bpy.data.collections.remove(c)
+
+
+def test_inventor_loops():
+    """Geschlossene Kette mit Schraubenantrieb (testdaten/inventor/iam/rottrans2: rottrans mit Gelenken statt
+    Abhängigkeiten, vom Nutzer umgebaut): Perno drehen -> Mutter wandert, Arme folgen, alle Joints bleiben geschlossen"""
+    path = "I:/GIT/FORMLYNX/testdaten/inventor/iam/rottrans2/Ensamblaje1.iam"
+    if not os.path.isfile(path):
+        print("testdaten/inventor/iam/rottrans2 fehlt – Schleifen-Test übersprungen")
+        return
+    before = set(bpy.data.collections)
+    objs, info = INV.build(ctx, path)
+    rig = next((o for o in objs if o.type == 'ARMATURE'), None)
+    check("loops Rig", rig is not None and info["loops"] == 4 and info["couplings"] == 1 and info["joints"] == 7, info)
+    pb = rig.pose.bones
+    check("loops Perno als Bone", "Zylindrisch:13" in pb and "SCREW Zylindrisch:14" in pb, [b.name for b in pb])
+    LIVE = INV.inventor_live
+    mm = INV.mm_to_bu(sc, 1.0)
+    M = LIVE.inventor_solver.Model(json.loads(rig["inventor_solver"]))
+    LIVE._last.pop(rig.as_pointer(), None)
+    drive = pb["Zylindrisch:13"]
+    for deg in range(30, 3781, 30):         # 10,5 Umdrehungen in Schritten wie beim Ziehen
+        drive.rotation_euler = (0, math.radians(deg), 0)
+        LIVE.solve_rig(rig, sc)
+    LIVE._set_pitch(rig, M, sc)
+    errs = M.loop_errors(_vals(rig, M))
+    check("loops geschlossen", errs and all(p / mm < 0.05 and a < 0.1 for _n, p, a in errs),
+          [(n, p / mm, a) for n, p, a in errs])
+    ctx.view_layer.update()
+    shift = pb["SCREW Zylindrisch:14"].location[1] / mm
+    check("loops Mutter 10,5 mm", abs(abs(shift) - 10.5) < 0.05, shift)
+    arm = pb["Drehbar:7"].rotation_euler[1]
+    check("loops Arm schwenkt", abs(arm) > math.radians(1), math.degrees(arm))
     for o in objs:
         bpy.data.objects.remove(o)
     for c in set(bpy.data.collections) - before:
@@ -399,7 +453,7 @@ def flx_run(name, func):
 
 
 try:
-    for test in (test_extension, test_inventor_import, test_inventor_rig, test_inventor_rottrans):
+    for test in (test_extension, test_inventor_import, test_inventor_rig, test_inventor_rottrans, test_inventor_loops):
         flx_run(test.__name__, test)
     bpy.ops.preferences.addon_disable(module=PKG)
     check("Extension sauber aus", not hasattr(bpy.types, "IVX_OT_import_inventor") and not menu_entries(), menu_entries())

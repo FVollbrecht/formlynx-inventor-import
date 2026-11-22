@@ -15,6 +15,7 @@ Abhängigkeiten (Passend, Fluchtend, …) werden gelesen, aber noch nicht übers
 liegt sie auf einem Zylinder-Joint, trägt ein Kind-Bone „SCREW …“ das Teil und ein Treiber schiebt ihn aus der
 Drehung des Joint-Bones (eigener Bone, sonst Abhängigkeitszyklus); Steigung je Umdrehung als Eigenschaft am Joint-Bone.
 """
+import json
 import math
 import re
 from collections import deque
@@ -22,7 +23,7 @@ from collections import deque
 import bpy
 from mathutils import Matrix, Vector
 
-from . import inventor_joints
+from . import inventor_joints, inventor_solver
 
 BONE_FRACTION = 0.4             # Bone-Länge relativ zur größten Abmessung des bewegten Teils
 MIN_BONE = 0.002                # m (in Blender-Einheiten umgerechnet über scale je mm)
@@ -69,14 +70,18 @@ def _prepare(joints, occurrences, scale):
             info["unmatched"].append(j["name"])
             continue
         # Rahmen von einer Seite mit bekannter Weltlage (Teile; Unterbaugruppen haben keine eigene Matrix)
-        if a.world is not None and fa is not None:
-            world, ref = a.world @ _scaled(fa, scale), a
-        elif b.world is not None and fb is not None:
-            world, ref = b.world @ _scaled(fb, scale), b
+        wa = a.world @ _scaled(fa, scale) if a.world is not None and fa is not None else None
+        wb = b.world @ _scaled(fb, scale) if b.world is not None and fb is not None else None
+        if wa is not None:
+            world, ref = wa, a
+        elif wb is not None:
+            world, ref = wb, b
         else:
             info["no_frame"].append(j["name"])
             continue
-        usable.append(dict(joint=j, a=a, b=b, world=world, ref=ref))
+        # fehlt eine Seite, gilt ihr Rahmen als deckungsgleich (Schließ-Bedingung relativ zur Ruhelage)
+        usable.append(dict(joint=j, a=a, b=b, world=world, ref=ref,
+                           world_a=wa if wa is not None else world, world_b=wb if wb is not None else world))
     return usable, info
 
 
@@ -134,6 +139,42 @@ def _couple(obj, pb, screw, coupling, scale):
         var.targets[0].id = obj
         var.targets[0].data_path = path
     drv.expression = f"rot * pitch * {scale / (2 * math.pi)!r}"
+
+
+VARS = {'REVOLUTE': ['ry'], 'CYLINDRICAL': ['ry', 'ly'], 'SLIDER': ['ly'], 'PLANAR': ['ry', 'lx', 'lz'],
+        'BALL': ['qx', 'qy', 'qz']}
+
+
+def _store_model(obj, joint_bones, screws, loops, part_bone, scale):
+    """Baum und Schleifen als inventor_solver-Modell (JSON) an obj["inventor_solver"]; ohne Schleifen nichts"""
+    if not loops:
+        return
+    bones = list(obj.data.bones)
+    index = {b.name: i for i, b in enumerate(bones)}
+    kinds = {bname: j["kind"] for bname, j, _e, _c in joint_bones}
+    driver_of = {s: j for j, s in screws.items()}
+    to_arm = obj.matrix_world.inverted()
+    obj["Inventor solver live"] = True
+    data = dict(bones=[], loops=[], length=max((b.length for b in bones), default=1.0) or 1.0)
+    for b in bones:
+        rel = b.parent.matrix_local.inverted() @ b.matrix_local if b.parent else b.matrix_local
+        kind = kinds.get(b.name)
+        names = [] if kind is None else (['ry'] if kind == 'CYLINDRICAL' and b.name in screws else VARS.get(kind, []))
+        lim = obj.pose.bones[b.name].constraints.get("Inventor limits")
+        data["bones"].append(dict(
+            name=b.name, parent=index[b.parent.name] if b.parent else -1,
+            rel=inventor_solver.flat([list(r) for r in rel]), vars=names,
+            screw=index[driver_of[b.name]] if b.name in driver_of else -1,
+            lim=[lim.min_y, lim.max_y] if lim is not None else None))
+    for e in loops:
+        ba, bb = obj.data.bones[part_bone[id(e["a"])]], obj.data.bones[part_bone[id(e["b"])]]
+        fa, fb = to_arm @ e["world_a"], to_arm @ e["world_b"]
+        data["loops"].append(dict(
+            name=e["joint"]["name"], kind=e["joint"]["kind"], a=index[ba.name], b=index[bb.name],
+            la=inventor_solver.flat([list(r) for r in ba.matrix_local.inverted() @ fa]),
+            lb=inventor_solver.flat([list(r) for r in bb.matrix_local.inverted() @ fb]),
+            t0=inventor_solver.flat([list(r) for r in fa.inverted() @ fb])))
+    obj["inventor_solver"] = json.dumps(data)
 
 
 def build(context, cfb, occurrences, collection, name, scale):
@@ -232,37 +273,17 @@ def build(context, cfb, occurrences, collection, name, scale):
         joint_bones.append((b.name, j, e, child))
         info["joints"] += 1
 
-    ik_pairs = []
+    # Schleifen: Bones auf den Wegen bis zum gemeinsamen Vorfahren bewegt der Löser, nicht die IK
+    in_loop = set()
     for e in loops:
-        j = e["joint"]
-        w = e["world"]
-        a, b = e["a"], e["b"]
-        # TIP an die Seite mit dem längeren Weg zur Wurzel: die IK-Kette soll möglichst viele Schleifengelenke enthalten
-        if _depth(eb[part_bone[id(a)]]) > _depth(eb[part_bone[id(b)]]):
-            a, b = b, a
-        sliding = j["kind"] in ('CYLINDRICAL', 'SLIDER')
-        length = max(min(_size(a.handles), _size(b.handles)) * BONE_FRACTION * 0.5, min_len)
-        if sliding:                     # TIP dehnt/schrumpft beim Gleiten: Länge = Weg, den er schrumpfen kann
-            length = max(_size(a.handles), _size(b.handles), min_len)
-        axis = w.col[2].xyz
-        pin = add("PIN " + j["name"], w.translation.copy(), axis, length, eb[part_bone[id(a)]])
-        tip = eb.new("TIP " + j["name"])
-        tip.tail = w.translation.copy()
-        tip.head = w.translation - axis.normalized() * length
-        tip.parent = eb[part_bone[id(b)]]
-        tip.use_connect = False
-        tip.use_deform = False
-        # Kettenlänge: TIP bis vor den gemeinsamen Vorfahren
-        ancestors = set()
-        x = pin.parent
-        while x is not None:
-            ancestors.add(x.name)
-            x = x.parent
-        count, x = 1, tip.parent
-        while x is not None and x.name not in ancestors:
-            count += 1
-            x = x.parent
-        ik_pairs.append((tip.name, pin.name, count, sliding))
+        paths = []
+        for occ in (e["a"], e["b"]):
+            names, x = set(), eb[part_bone[id(occ)]]
+            while x is not None:
+                names.add(x.name)
+                x = x.parent
+            paths.append(names)
+        in_loop |= paths[0] ^ paths[1]
         info["loops"] += 1
 
     # IK-Steuerung an Kettenenden mit mindestens zwei Drehgelenken
@@ -273,12 +294,13 @@ def build(context, cfb, occurrences, collection, name, scale):
     for bname, j, e, child in joint_bones:
         if bname in has_child or bname not in rotating:
             continue
-        axes, x = [], eb[bname]
+        axes, x, looped = [], eb[bname], False
         while x is not None and not x.name.startswith("ROOT "):
+            looped |= x.name in in_loop
             if x.name in rotating:
                 axes.append((x.head.copy(), (x.tail - x.head).normalized(), x.name in balls))
             x = x.parent
-        if len(axes) < 2 or _collinear(axes):
+        if looped or len(axes) < 2 or _collinear(axes):
             continue                    # eine Achse (Schraube auf Scheibe): IK bringt nichts
         src = eb[bname]
         ctrl = eb.new("IK " + bname)
@@ -337,21 +359,14 @@ def build(context, cfb, occurrences, collection, name, scale):
             _couple(obj, pose[bname], pose[screws[bname]], couplings[frozenset((id(e["a"]), id(e["b"])))], scale)
             info["couplings"] += 1
 
-    for tip, pin, count, sliding in ik_pairs:
-        pb = pose[tip]
-        pb.lock_ik_x = pb.lock_ik_y = pb.lock_ik_z = True
-        ik = pb.constraints.new('IK')
-        ik.target, ik.subtarget = obj, pin
-        ik.chain_count = count
-        ik.use_stretch = sliding
-        if sliding:
-            pb.ik_stretch = 1.0             # nur der TIP dehnt: Verschiebung längs der Gelenkachse
-        ik.name = "Inventor loop"
     for bname, ctrl, depth in controls:
         ik = pose[bname].constraints.new('IK')
         ik.target, ik.subtarget = obj, ctrl
         ik.chain_count = depth
         ik.name = "Inventor IK"
+
+    # Löser-Modell: Baum + Schließ-Bedingungen (inventor_solver), als Text an der Armature
+    _store_model(obj, joint_bones, screws, loops, part_bone, scale)
 
     # Teile an ihre Bones hängen, Weltlage behalten
     context.view_layer.update()

@@ -22,7 +22,7 @@ from bpy.types import OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix
 
-from . import inventor_data, inventor_part, inventor_props, inventor_rig, inventor_zstd
+from . import inventor_data, inventor_part, inventor_props, inventor_live, inventor_rig, inventor_zstd
 from ._compat import CTX, mm_to_bu, rpt_
 
 
@@ -427,12 +427,14 @@ def menu_import(self, context):
     self.layout.operator("ivx.import_inventor", text_ctxt=CTX, text="Inventor (.iam, .ipt)")
 
 
-classes = (IVX_OT_import_inventor,)
+classes = (IVX_OT_import_inventor,) + inventor_live.classes
 
 
 def register():
+    inventor_live.register()
     bpy.types.TOPBAR_MT_file_import.append(menu_import)
 
 
 def unregister():
+    inventor_live.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
