@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 – 2026-11-23
 
 **New**
 - **Closed loops are solved**: mechanisms with closed chains (linkages, screw and nut with arms) now move as a whole. Turning any joint bone moves the dependent joints so that every joint stays closed, like in Inventor. Duplicate joints between the same two parts are allowed. *Bake Inventor Rig* (Pose menu) writes the motion to keyframes for export.
