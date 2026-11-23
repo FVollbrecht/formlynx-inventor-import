@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "formlynx_inventor_import"
-version = "1.1.0"
+version = "1.1.1"
 name = "FORMLYNX Inventor Import"
 tagline = "Import Inventor assemblies and parts as meshes without Inventor"
 maintainer = "Frederik Vollbrecht"
