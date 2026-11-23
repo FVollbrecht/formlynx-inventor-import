@@ -73,6 +73,64 @@ def _material(info):
     return material
 
 
+DECAL_OFFSET = 0.01         # mm über der Fläche, gegen Z-Fighting
+
+
+def _decal_image(raw, ext, name):
+    """Eingebettetes Bild als gepacktes Bild-Datablock (kein Schreiben auf die Platte); GIF über eigenen Leser"""
+    if ext == "gif":
+        w, h, rgba = inventor_part.gif_rgba(raw)
+        image = bpy.data.images.new(name, w, h, alpha=True)
+        image.pixels.foreach_set(rgba[::-1].ravel())         # Blender: Zeile 0 = unten
+        image.pack()                                         # als PNG in die .blend
+        return image
+    image = bpy.data.images.new(name, 8, 8)
+    image.pack(data=raw, data_len=len(raw))         # erst packen, dann Pfad: sonst sucht 4.5 die Datei
+    image.source = 'FILE'
+    image.filepath_raw = f"//{name}.{ext}"
+    image.reload()
+    return image
+
+
+def _decal_object(decal, name, scale, root):
+    """Aufkleber als Gitter mit Bildmaterial dicht über den Flächen (umwickelt mehrere Flächen)"""
+    verts = (decal["verts"] + decal["normals"] * DECAL_OFFSET) * scale
+    quads = decal["quads"]
+    mesh = bpy.data.meshes.new(name)
+    mesh.vertices.add(len(verts))
+    mesh.vertices.foreach_set("co", verts.astype(np.float32).ravel())
+    mesh.loops.add(len(quads) * 4)
+    mesh.loops.foreach_set("vertex_index", quads.astype(np.int32).ravel())
+    mesh.polygons.add(len(quads))
+    mesh.polygons.foreach_set("loop_start", np.arange(0, len(quads) * 4, 4, dtype=np.int32))
+    mesh.update(calc_edges=True)
+    uv = mesh.uv_layers.new(name="UVMap")
+    uv.data.foreach_set("uv", decal["uv"][quads].astype(np.float32).ravel())
+    mesh.polygons.foreach_set("use_smooth", np.ones(len(quads), dtype=bool))
+    mesh.update()
+    material = bpy.data.materials.new(name)
+    if material.node_tree is None:
+        try:
+            material.use_nodes = True
+        except AttributeError:
+            pass
+    if decal["image"] and material.node_tree:
+        nodes, links = material.node_tree.nodes, material.node_tree.links
+        bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        tex = nodes.new("ShaderNodeTexImage")
+        tex.image = _decal_image(*decal["image"], name)
+        tex.extension = 'CLIP'
+        tex.location = (-400, 300)
+        if bsdf is not None:
+            links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+            links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
+            bsdf.inputs["Roughness"].default_value = 0.5
+    mesh.materials.append(material)
+    obj = bpy.data.objects.new(name, mesh)
+    root.objects.link(obj)
+    return obj
+
+
 def _fill(mesh, body, scale, mats, items, materials, color_names=None):
     verts, tris, loop_normals, mat_idx, _ = body
     n = len(tris)
@@ -282,8 +340,62 @@ def build(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, ipr
                          constraints=rig_info.get("constraints", 0), couplings=rig_info.get("couplings", 0))
 
 
+REF_KEY = "ivx_reference"            # Kennung der Bezugsgeometrie (zählt nicht als Teil)
+
+
+def _reference_objects(ref, stem, scale, mode, root, place):
+    """Skizzen (Kurven), Ebenen (Viereck, Drahtgitter), Ursprungsachsen (Linie) und Mittelpunkt (Empty) in eine
+    eigene Collection. mode 'VISIBLE': nur in Inventor sichtbare, 'ALL': auch ausgeblendete (ausgeblendet)."""
+    items = []
+    for sk in ref["sketches"]:
+        if sk["curves"]:
+            items.append(("sketch", sk))
+    items += [("plane", p) for p in ref["planes"]] + [("axis", a) for a in ref["axes"]]
+    if ref.get("center"):
+        items.append(("point", ref["center"]))
+    items = [(k, it) for k, it in items if mode == 'ALL' or not it["hidden"]]
+    if not items:
+        return []
+    coll = bpy.data.collections.new(f"{stem} – Reference")
+    root.children.link(coll)
+    span = max((float(np.ptp(it["corners"], axis=0).max()) for k, it in items if k == "plane"), default=100.0)
+    made = []
+    for kind, it in items:
+        if kind == "sketch":
+            data = bpy.data.curves.new(it["name"], 'CURVE')
+            data.dimensions = '3D'
+            for pts in it["curves"]:
+                spline = data.splines.new('POLY')
+                spline.points.add(len(pts) - 1)
+                co = np.hstack([pts * scale, np.ones((len(pts), 1))]).astype(np.float32)
+                spline.points.foreach_set("co", co.ravel())
+        elif kind in ("plane", "axis"):
+            pts = it["corners"] if kind == "plane" else np.array([it["p0"], it["p1"]])
+            data = bpy.data.meshes.new(it["name"])
+            data.from_pydata((pts * scale).tolist(), [(0, 1)] if kind == "axis" else [], [(0, 1, 2, 3)] if kind == "plane" else [])
+            data.update()
+        else:
+            data = None
+        obj = bpy.data.objects.new(it["name"], data)
+        if kind == "point":
+            obj.empty_display_type = 'PLAIN_AXES'
+            obj.empty_display_size = 0.03 * span * scale
+            obj.location = it["p"] * scale
+        if kind == "plane":
+            obj.display_type = 'WIRE'
+        obj.hide_render = True
+        obj[REF_KEY] = kind
+        coll.objects.link(obj)
+        place(obj)
+        if it["hidden"]:
+            obj.hide_set(True)
+        made.append(obj)
+    return made
+
+
 @_zstd_cached
-def build_part(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, iproperties=True):
+def build_part(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True, iproperties=True,
+               reference='VISIBLE'):
     """Liest die .ipt und baut ein Objekt je Körper -> (Objektliste, Info-dict). Wirft inventor_data.InventorError"""
     result = inventor_part.read(path)
     scale = mm_to_bu(context.scene, 1.0)
@@ -329,6 +441,22 @@ def build_part(context, path, up='AUTO', hierarchy='COLLECTIONS', materials=True
         else:
             obj.matrix_basis = up_matrix
         created.append(obj)
+    bobjs = [o for o in created if o.type == 'MESH']
+
+    def place(obj):
+        if parent is not None:
+            obj.parent = parent
+        else:
+            obj.matrix_basis = up_matrix
+
+    if reference != 'NONE':
+        created += _reference_objects(result.get("reference") or {"sketches": [], "planes": [], "axes": []},
+                                      stem, scale, reference, root, place)
+    for number, decal in enumerate(result.get("decals", ()), 1) if materials else ():
+        body = bobjs[min(decal["body"], len(bobjs) - 1)]
+        obj = _decal_object(decal, f"{stem} – Decal {number}", scale, root)
+        obj.parent = body                          # gleiche lokale Lage wie der Körper
+        created.append(obj)
     return created, dict(skipped=0, names_ok=True, occurrences=1)
 
 
@@ -363,11 +491,17 @@ class IVX_OT_import_inventor(bpy.types.Operator, ImportHelper):
                          description="Turn the Inventor joints of an assembly into an armature: one bone per joint "
                                      "with IK locks and limits for its degrees of freedom")
 
+    reference: EnumProperty(translation_context=CTX, name="Reference Geometry", default='VISIBLE', items=[
+        ('VISIBLE', "Visible", "Parts only: sketches, work planes, axes and the center point shown in Inventor"),
+        ('ALL', "All", "Parts only: also the hidden ones, imported hidden"),
+        ('NONE', "None", "No sketches or work features"),
+    ])
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
-        for key in ("hierarchy", "up", "materials", "iproperties", "joints"):
+        for key in ("hierarchy", "up", "materials", "iproperties", "joints", "reference"):
             layout.prop(self, key)
 
     def execute(self, context):
@@ -380,7 +514,8 @@ class IVX_OT_import_inventor(bpy.types.Operator, ImportHelper):
             path = os.path.join(folder, name)
             try:
                 if name.lower().endswith(".ipt"):
-                    objs, info = build_part(context, path, self.up, self.hierarchy, self.materials, self.iproperties)
+                    objs, info = build_part(context, path, self.up, self.hierarchy, self.materials, self.iproperties,
+                                            self.reference)
                 else:
                     objs, info = build(context, path, self.up, self.hierarchy, self.materials, self.iproperties,
                                        self.joints)
@@ -408,10 +543,11 @@ class IVX_OT_import_inventor(bpy.types.Operator, ImportHelper):
             obj.select_set(False)
         made = set(created)
         roots = [o for o in created if o.parent not in made]
-        active = roots[0] if len(roots) == 1 else next((o for o in created if o.type == 'MESH'), created[0])
+        active = roots[0] if len(roots) == 1 else next((o for o in created if o.type == 'MESH' and REF_KEY not in o),
+                                                       created[0])
         active.select_set(True)
         context.view_layer.objects.active = active
-        parts = sum(1 for o in created if o.type == 'MESH')
+        parts = sum(1 for o in created if o.type == 'MESH' and REF_KEY not in o)
         problems = failed + [rpt_("{name} (no display mesh)").format(name=n) for n in parts_only]
         if problems:
             self.report({'WARNING'}, rpt_("Imported {parts} parts, could not read: {name}").format(parts=parts, name=", ".join(problems)))

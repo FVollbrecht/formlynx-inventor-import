@@ -4,6 +4,7 @@
 
 **New**
 - **Closed loops are solved**: mechanisms with closed chains (linkages, screw and nut with arms) now move as a whole. Turning any joint bone moves the dependent joints so that every joint stays closed, like in Inventor. Duplicate joints between the same two parts are allowed. *Bake Inventor Rig* (Pose menu) writes the motion to keyframes for export.
+- **Sketches and work features of parts**: importing a part (.ipt) also brings its 2D and 3D sketches as curves (lines, arcs, splines, curves projected onto faces), work planes, the origin planes and axes and the center point, in their own collection and only for viewing (not rendered). *Reference Geometry* chooses what: what is visible in Inventor (default), all (hidden ones come in hidden) or none. Parts made only of sketches and surfaces can now be imported.
 - **Rotation-translation** constraints (e.g. screw and nut) move the rig: turning the joint bone slides the part by the pitch from Inventor. The pitch is a property of the joint bone and can be changed or reversed there.
 
 **Fixed**

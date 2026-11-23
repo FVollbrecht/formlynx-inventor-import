@@ -12,6 +12,7 @@ import traceback
 
 import bpy
 import numpy as np
+from mathutils import Vector
 from mathutils import Matrix, Vector
 
 EXT_ZIP = sys.argv[sys.argv.index("--") + 1]
@@ -453,8 +454,184 @@ def flx_run(name, func):
     print(f"@@TEST {name} {'FAIL' if bad else 'OK'} {_t.time() - t0:.1f} 0 {bad}", flush=True)
 
 
+def test_inventor_decal():
+    """Aufkleber auf der Unterseite (Bild eingebettet), Sollwerte per Inventor-COM: 4,6 × 4,6 cm, x −0,2…4,4 cm"""
+    path = "I:/GIT/FORMLYNX/testdaten/inventor/ipt/decal/Bauteil2.ipt"
+    if not os.path.isfile(path):
+        print("testdaten/inventor/ipt/decal fehlt – Aufkleber-Test übersprungen")
+        return
+    ctx = bpy.context
+    INV = sys.modules[PKG + ".inventor_import"]
+    sc = ctx.scene
+    before = set(bpy.data.collections)
+    objs, info = INV.build_part(ctx, path)
+    decals = [o for o in objs if "Decal" in o.name]
+    check("decal Objekt", len(decals) == 1, [o.name for o in objs])
+    mm = INV.mm_to_bu(sc, 1.0)
+
+    def corners(d):
+        """Bildecken (uv 0/1) in mm, Welt"""
+        bpy.context.view_layer.update()
+        uv = d.data.uv_layers[0].data
+        out = {}
+        for poly in d.data.polygons:
+            for li in poly.loop_indices:
+                key = tuple(round(c, 4) for c in uv[li].uv)
+                if key in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                    out[key] = (d.matrix_world @ d.data.vertices[d.data.loops[li].vertex_index].co) / mm
+        return out
+
+    def image_of(d):
+        tex = next((n for n in d.data.materials[0].node_tree.nodes if n.type == 'TEX_IMAGE'), None)
+        return tex.image if tex else None
+
+    if decals:
+        d = decals[0]
+        c = corners(d)
+        # Position (Skizze 0,2 / −2,3) = Bild oben links -> Modell x −2, y −23; Bild in der Skizze 180° gedreht.
+        # Rechte Ecken (x 44, y ±23) liegen außerhalb der verrundeten Unterseite -> fallen weg
+        pts = [(d.matrix_world @ v.co) / mm for v in d.data.vertices]
+        check("decal Lage", (0, 1) in c and (c[(0, 1)] - Vector((-2, -23, 0))).length < 0.05
+              and (0, 0) in c and (c[(0, 0)] - Vector((-2, 23, 0))).length < 0.05 and (1, 0) not in c
+              and abs(max(p.x for p in pts) - 44) < 0.05, c)
+        # nicht gespiegelt: Bild-x × Bild-y zeigt nach außen (Unterseite: −Z)
+        uv = d.data.uv_layers[0].data
+        poly = d.data.polygons[0]
+        p = [d.data.vertices[d.data.loops[li].vertex_index].co for li in poly.loop_indices]
+        t = [uv[li].uv for li in poly.loop_indices]
+        du, dv = t[1] - t[0], t[3] - t[0]
+        e1, e2 = p[1] - p[0], p[3] - p[0]
+        det = du.x * dv.y - du.y * dv.x                     # Bildachsen aus dem Viereck (UV -> 3D)
+        ax = (e1 * dv.y - e2 * du.y) / det
+        ay = (e2 * du.x - e1 * dv.x) / det
+        check("decal Ausrichtung", ax.cross(ay).z < 0, (ax, ay))
+        img = image_of(d)
+        check("decal Bild eingebettet", img is not None and img.packed_file is not None
+              and tuple(img.size) == (1254, 1254), img and tuple(img.size))
+        check("decal am Körper", d.parent is not None and d.parent.type == 'MESH')
+    for o in objs:
+        img = [n.image for m in getattr(o.data, "materials", ()) if m and m.node_tree
+               for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image]
+        bpy.data.objects.remove(o)
+        for i in img:
+            bpy.data.images.remove(i)
+    for c in set(bpy.data.collections) - before:
+        bpy.data.collections.remove(c)
+
+    # Umwickeln: Aufkleber1 von der Abflachung (y −7,25 mm) auf den Zylinder r 12,5 mm; Aufkleber2 (GIF) nur Zylinder
+    path = "I:/GIT/FORMLYNX/testdaten/inventor/ipt/decal/Bauteil1.ipt"
+    before = set(bpy.data.collections)
+    objs, info = INV.build_part(ctx, path)
+    decals = [o for o in objs if "Decal" in o.name]
+    check("decal zwei Aufkleber", len(decals) == 2, [o.name for o in objs])
+    if len(decals) == 2:
+        d1, d2 = decals
+        c = corners(d1)
+        # links oben auf der Abflachung (Skizze 0,0 -> x −10,18, z 50), rechts auf dem Zylinder (Bogen 12,2 mm)
+        check("decal umwickelt Lage", len(c) == 4 and (c[(0, 1)] - Vector((-10.18, -7.25, 50))).length < 0.05
+              and abs(c[(1, 1)].z - 50) < 0.05 and abs(Vector((c[(1, 1)].x, c[(1, 1)].y)).length - 12.5) < 0.05, c)
+        rad = [Vector(((d1.matrix_world @ v.co).x, (d1.matrix_world @ v.co).y)).length / mm for v in d1.data.vertices]
+        check("decal umwickelt nicht innen", min(rad) > 12.5 * 0.5 and max(rad) < 12.5 + 0.05, (min(rad), max(rad)))
+        check("decal GIF als Bild", image_of(d2) is not None and tuple(image_of(d2).size) == (512, 512)
+              and image_of(d2).packed_file is not None, image_of(d2) and tuple(image_of(d2).size))
+        on_cyl = [abs(Vector(((d2.matrix_world @ v.co).x, (d2.matrix_world @ v.co).y)).length / mm - 12.5) < 0.05
+                  for v in d2.data.vertices]
+        check("decal Zylinder", all(on_cyl), sum(on_cyl))
+    for o in objs:
+        img = [n.image for m in getattr(o.data, "materials", ()) if m and m.node_tree
+               for n in m.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image]
+        bpy.data.objects.remove(o)
+        for i in img:
+            bpy.data.images.remove(i)
+    for c in set(bpy.data.collections) - before:
+        bpy.data.collections.remove(c)
+
+
+def test_inventor_reference():
+    """Skizzen (2D auf Ursprungs- und Arbeitsebene, 3D mit Biegung, auf die Fläche projizierte Splines), Ebenen,
+    Achsen, Mittelpunkt. Sollwerte per Inventor-COM (Spline_Ebenen.ipt): Skizze2/3 ausgeblendet, Rest sichtbar."""
+    path = "I:/GIT/FORMLYNX/testdaten/inventor/ipt/reference/Spline_Ebenen.ipt"
+    if not os.path.isfile(path):
+        print("testdaten/inventor/ipt/reference fehlt – Bezugsgeometrie-Test übersprungen")
+        return
+    ctx = bpy.context
+    INV = sys.modules[PKG + ".inventor_import"]
+    mm = INV.mm_to_bu(ctx.scene, 1.0)
+    before = set(bpy.data.collections)
+
+    def world(o):
+        ctx.view_layer.update()
+        if o.type == 'CURVE':
+            return [o.matrix_world @ Vector(p.co[:3]) / mm for s in o.data.splines for p in s.points]
+        if o.type == 'MESH':
+            return [o.matrix_world @ v.co / mm for v in o.data.vertices]
+        return [o.matrix_world.translation / mm]
+
+    def near(pts, q, tol=0.05):
+        return any((p - Vector(q)).length < tol for p in pts)
+
+    objs, info = INV.build_part(ctx, path, reference='ALL')
+    by = {o.name: o for o in objs}
+    sketches = {"Skizze1", "3D-Skizze1", "Skizze2", "Skizze3", "Skizze4", "3D-Skizze2"}
+    check("ref Skizzen", sketches <= set(by) and all(by[n].type == 'CURVE' for n in sketches & set(by)), sorted(by))
+    check("ref Fläche", sum(o.type == 'MESH' and "ivx_reference" not in o for o in objs) == 1)
+    hidden = {o.name for o in objs if o.hide_get()}
+    check("ref ausgeblendet", hidden == {"Skizze2", "Skizze3"}, hidden)
+    if sketches <= set(by):
+        p = world(by["Skizze1"])
+        check("ref Kreis r 12,5 auf XY", all(abs(v.length - 12.5) < 0.01 and abs(v.z) < 1e-6 for v in p), len(p))
+        p = world(by["Skizze2"])
+        check("ref Skizze2 auf XZ (u = −X)", all(abs(v.y) < 1e-6 and v.x > 30 for v in p) and near(p, (47.672, 0, 2.596)))
+        p = world(by["Skizze3"])
+        check("ref Skizze3 auf Arbeitsebene1", all(abs(v.y + 25.5) < 1e-4 for v in p) and near(p, (48.97, -25.5, 5.31), 0.01))
+        p = world(by["3D-Skizze1"])
+        check("ref 3D-Linien", near(p, (0, 0, 20)) and near(p, (15, 0, 20)) and near(p, (15, -10, 20)))
+        check("ref 3D-Bogen", near(p, (13.632 + 1.711 * 0.7994, -10, 21.028 - 1.711 * 0.6008), 0.01), len(p))
+        p = world(by["Skizze4"])
+        check("ref Langloch", near(p, (33.92, -8.408, 0)) and near(p, (41.236, -20.208, 0)) and len(by["Skizze4"].data.splines) == 5)
+        p = world(by["3D-Skizze2"])
+        check("ref projizierte Splines", len(by["3D-Skizze2"].data.splines) == 5 and near(p, (33.92, -8.408, 8.765))
+              and near(p, (45.14, -17.788, 7.03)), len(p))
+    planes = {n: by[n] for n in ("YZ Plane", "XZ Plane", "XY Plane", "Arbeitsebene1") if n in by}
+    check("ref Ebenen", len(planes) == 4 and all(len(o.data.polygons) == 1 for o in planes.values()), sorted(by))
+    if "Arbeitsebene1" in planes and "XY Plane" in planes:
+        p = world(planes["Arbeitsebene1"])
+        check("ref Arbeitsebene1 y −25,5", all(abs(v.y + 25.5) < 1e-4 for v in p))
+        p = world(planes["XY Plane"])
+        check("ref XY-Ebene Größe wie Inventor", abs(min(v.x for v in p) + 15.57) < 0.05 and abs(max(v.x for v in p) - 52.05) < 0.05,
+              (min(v.x for v in p), max(v.x for v in p)))
+    check("ref Achsen", all(n in by and len(by[n].data.edges) == 1 for n in ("X Axis", "Y Axis", "Z Axis")))
+    check("ref Mittelpunkt", "Center Point" in by and by["Center Point"].type == 'EMPTY')
+    check("ref nicht im Render", all(o.hide_render for o in objs if "ivx_reference" in o))
+
+    def cleanup(objs):
+        for o in objs:
+            data = o.data
+            bpy.data.objects.remove(o)
+            if data is not None and data.users == 0:
+                (bpy.data.curves if isinstance(data, bpy.types.Curve) else bpy.data.meshes).remove(data)
+        for c in set(bpy.data.collections) - before:
+            bpy.data.collections.remove(c)
+
+    cleanup(objs)
+    objs, info = INV.build_part(ctx, path)                    # Standard: nur sichtbare
+    names = {o.name for o in objs}
+    check("ref nur sichtbare", "Skizze1" in names and not {"Skizze2", "Skizze3"} & names, sorted(names))
+    cleanup(objs)
+    objs, info = INV.build_part(ctx, path, reference='NONE')
+    check("ref keine", not any("ivx_reference" in o for o in objs), [o.name for o in objs])
+    cleanup(objs)
+    # Teile mit ausgeblendetem Ursprung: Standard bringt keine Bezugsgeometrie
+    other = "I:/GIT/FORMLYNX/testdaten/inventor/ipt/test mb color.ipt"
+    if os.path.isfile(other):
+        objs, info = INV.build_part(ctx, other)
+        check("ref ausgeblendeter Ursprung", not any("ivx_reference" in o for o in objs), [o.name for o in objs])
+        cleanup(objs)
+
+
 try:
-    for test in (test_extension, test_inventor_import, test_inventor_rig, test_inventor_rottrans, test_inventor_loops):
+    for test in (test_extension, test_inventor_import, test_inventor_rig, test_inventor_rottrans, test_inventor_loops,
+                 test_inventor_decal, test_inventor_reference):
         flx_run(test.__name__, test)
     bpy.ops.preferences.addon_disable(module=PKG)
     check("Extension sauber aus", not hasattr(bpy.types, "IVX_OT_import_inventor") and not menu_entries(), menu_entries())

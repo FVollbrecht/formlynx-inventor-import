@@ -94,3 +94,24 @@ msgstr "Schleifen des aktiven Inventor-Rigs für jedes Bild des Szenenbereichs l
 
 msgid "No loop model on this rig"
 msgstr "Dieses Rig hat kein Schleifenmodell"
+
+msgid "Reference Geometry"
+msgstr "Bezugsgeometrie"
+
+msgid "Visible"
+msgstr "Sichtbare"
+
+msgid "All"
+msgstr "Alle"
+
+msgid "None"
+msgstr "Keine"
+
+msgid "Parts only: sketches, work planes, axes and the center point shown in Inventor"
+msgstr "Nur Bauteile: in Inventor sichtbare Skizzen, Arbeitsebenen, Achsen und Mittelpunkt"
+
+msgid "Parts only: also the hidden ones, imported hidden"
+msgstr "Nur Bauteile: auch ausgeblendete, ausgeblendet importiert"
+
+msgid "No sketches or work features"
+msgstr "Keine Skizzen und Arbeitselemente"
