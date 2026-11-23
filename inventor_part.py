@@ -6,7 +6,7 @@
 
 Netz aus PmGraphicsSegment (Anzeigenetz je Fläche), Körper und Flächenfarben aus PmBRepSegment (ASM/ACIS SAB),
 Farbwerte aus PmAppSegment (Darstellungen). Zuordnung B-Rep-Fläche <-> Grafikfläche über die Eckpunkte
-(liegen exakt im Netz), Feature-ID und Flächenart. Format und Regeln: atlas/ATLAS.md („.ipt-Netz“).
+(liegen exakt im Netz), Feature-ID und Flächenart.
 Prototyp mit Diagnose-Ausgabe: tools/ipt_probe.py.
 """
 import bisect

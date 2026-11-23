@@ -2,7 +2,7 @@
 
 Netz aus PmGraphicsSegment (Anzeigenetz je Fläche), Körper und Farben aus PmBRepSegment (ASM/ACIS SAB),
 Farbwerte aus PmAppSegment (Darstellungen). Zuordnung B-Rep-Fläche <-> Grafikfläche über die Eckpunkte
-(liegen exakt im Netz), Feature-ID und Flächenart. Erkenntnisse: atlas/ATLAS.md („.ipt-Netz“).
+(liegen exakt im Netz), Feature-ID und Flächenart.
 
 Aufruf: python -X utf8 tools/ipt_probe.py <datei.ipt> [...]
 """
@@ -11,13 +11,19 @@ import importlib.util
 import re
 import struct
 import sys
-import zlib
 from collections import defaultdict
 
 import numpy as np
 
-spec = importlib.util.spec_from_file_location("inventor_data", r"I:\GIT\FORMLYNX\modulynx\inventor_data.py")
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+import types
+from pathlib import Path
+
+# inventor_data aus diesem Repo laden, ohne das Add-on-__init__ (bpy) auszuführen
+_repo = Path(__file__).resolve().parents[1]
+_pkg = types.ModuleType("ipt_pkg"); _pkg.__path__ = [str(_repo)]
+sys.modules["ipt_pkg"] = _pkg
+spec = importlib.util.spec_from_file_location("ipt_pkg.inventor_data", _repo / "inventor_data.py")
+m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
 
 HEAD = b"\x02\x00\x00\x30"
 # Kopf eines Flächen-Eintrags: Feld (k, k, 0x10000000) mit k Paaren (Feature-ID u32, ffffffff), meist k = 1.
@@ -41,9 +47,8 @@ def segments(path):
             raw = cfb.get("RSeStorage/B" + p[12:])
             if not words or raw is None:
                 continue
-            try:
-                raw = zlib.decompressobj().decompress(raw[18:])
-            except zlib.error:
+            raw = m.unpack_segment(raw)              # zlib oder Zstandard (neuere Dateien)
+            if raw is None:
                 continue
             out.setdefault(words[0].decode("utf-16le"), raw)
     return out
